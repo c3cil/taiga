@@ -1,117 +1,68 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
 #include <string>
 #include <windows.h>
 
-#include "base64.h"
-#include "crypto.h"
-#include "gzip.h"
-#include "string.h"
+#include "base/crypto.h"
 
-namespace base {
-const wchar_t encryption_char = L'?';
-const wchar_t* encryption_key = L"Tenori Taiga";
-const size_t encryption_length_min = 16;
-
-std::wstring Xor(std::wstring str, const std::wstring& key) {
-  for (size_t i = 0; i < str.size(); i++)
-    str[i] = str[i] ^ key[i % key.length()];
-
-  return str;
-}
-
-}  // namespace base
-
-std::wstring SimpleEncrypt(std::wstring str) {
-  // Set minimum length
-  if (str.length() > 0 && str.length() < base::encryption_length_min)
-    str.append(base::encryption_length_min - str.length(),
-               base::encryption_char);
-
-  // Encrypt
-  str = base::Xor(str, base::encryption_key);
-
-  // Convert to hexadecimal string
-  std::wstring buffer;
-  for (size_t i = 0; i < str.size(); i++) {
-    wchar_t c[32] = {'\0'};
-    _itow_s(str[i], c, 32, 16);
-    if (wcslen(c) == 1)
-      buffer.push_back('0');
-    buffer += c;
-  }
-  ToUpper(buffer);
-
-  return buffer;
-}
-
-std::wstring SimpleDecrypt(std::wstring str) {
-  // Convert from hexadecimal string
-  std::wstring buffer;
-  for (size_t i = 0; i < str.size(); i = i + 2) {
-    wchar_t c = static_cast<wchar_t>(wcstoul(str.substr(i, 2).c_str(),
-                                             nullptr, 16));
-    buffer.push_back(c);
-  }
-
-  // Decrypt
-  buffer = base::Xor(buffer, base::encryption_key);
-
-  // Trim characters appended to match the minimum length
-  if (buffer.size() >= base::encryption_length_min)
-    TrimRight(buffer, std::wstring(1, base::encryption_char).c_str());
-
-  return buffer;
-}
-
-////////////////////////////////////////////////////////////////////////////////
+#include "base/base64.h"
+#include "base/gzip.h"
+#include "base/string.h"
 
 StringCoder::StringCoder()
     : magic_string_("TAI"),
-      min_length_(3 + 1 + 2 + 2),
-      version_(0x00) {
+      min_length_(3 + 1 + 2 + 2 + 2),
+      version_(0x01) {
 }
 
-bool StringCoder::Encode(const std::wstring& input, std::wstring& output,
-                         const std::wstring& metadata) {
-  if (input.empty())
+bool StringCoder::Encode(const std::wstring& metadata, const std::wstring& data,
+                         std::wstring& output) {
+  if (data.empty())
     return false;
 
-  std::string data;
-  if (!DeflateString(WstrToStr(input), data))
+  std::string converted_metadata = WstrToStr(metadata);
+  std::string converted_data = WstrToStr(data);
+
+  std::string compressed_data;
+  if (!DeflateString(converted_data, compressed_data))
     return false;
 
   std::string buffer;
   buffer.append(magic_string_);
   buffer.push_back(version_);
-  buffer.append(ConvertSizeToString(metadata.size()));
-  buffer.append(WstrToStr(metadata));
-  buffer.append(ConvertSizeToString(input.size()));
-  buffer.append(data);
+  buffer.append(ConvertSizeToString(
+      static_cast<unsigned short>(converted_metadata.size())));
+  buffer.append(converted_metadata);
+  buffer.append(ConvertSizeToString(
+      static_cast<unsigned short>(compressed_data.size())));
+  buffer.append(ConvertSizeToString(
+      static_cast<unsigned short>(converted_data.size())));
+  buffer.append(compressed_data);
 
   output = StrToWstr(Base64Encode(buffer));
 
   return true;
 }
 
-bool StringCoder::Decode(const std::wstring& input, std::wstring& output,
-                         std::wstring& metadata) {
+bool StringCoder::Decode(const std::wstring& input, std::wstring& metadata,
+                         std::wstring& data) {
   if (input.empty())
     return false;
 
@@ -121,7 +72,7 @@ bool StringCoder::Decode(const std::wstring& input, std::wstring& output,
     return false;
 
   size_t pos = magic_string_.size();
-  
+
   if (decoded.substr(0, pos) != magic_string_)
     return false;
 
@@ -137,17 +88,19 @@ bool StringCoder::Decode(const std::wstring& input, std::wstring& output,
 
   unsigned short data_size = ReadSize(decoded, pos);
   pos += sizeof(data_size);
-  if (data_size > 0) {
+  unsigned short inflated_data_size = ReadSize(decoded, pos);
+  pos += sizeof(inflated_data_size);
+  if (data_size > 0 && inflated_data_size > 0) {
     decoded = decoded.substr(pos, data_size);
   } else {
     return false;
   }
 
   std::string inflated;
-  if (!InflateString(decoded, inflated, data_size))
+  if (!InflateString(decoded, inflated, inflated_data_size))
     return false;
 
-  output = StrToWstr(inflated);
+  data = StrToWstr(inflated);
 
   return true;
 }
@@ -162,8 +115,7 @@ std::string StringCoder::ConvertSizeToString(unsigned short value) {
   return output;
 }
 
-unsigned short StringCoder::ReadSize(const std::string& str,
-                                     unsigned short pos) {
+unsigned short StringCoder::ReadSize(const std::string& str, size_t pos) {
   unsigned short result = 0;
   size_t len = sizeof(result);
 
@@ -201,7 +153,7 @@ std::string HmacSha1(const std::string& key_bytes, const std::string& data) {
 
   if (CryptAcquireContext(&hProv, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
     if (CryptCreateHash(hProv, CALG_SHA1, 0, 0, &hHash)) {
-      if (CryptHashData(hHash, (BYTE*)key_bytes.c_str(), key_bytes.size(), 0)) {
+      if (CryptHashData(hHash, (BYTE*)key_bytes.c_str(), (DWORD)key_bytes.size(), 0)) {
         const size_t key_size = 1024;
         struct {
           BLOBHEADER hdr;
@@ -212,13 +164,13 @@ std::string HmacSha1(const std::string& key_bytes, const std::string& data) {
         key_blob.hdr.bVersion = CUR_BLOB_VERSION;
         key_blob.hdr.reserved = 0;
         key_blob.hdr.aiKeyAlg = CALG_RC2;
-        key_blob.len = key_bytes.size();
+        key_blob.len = (DWORD)key_bytes.size();
         ZeroMemory(key_blob.key, sizeof(key_blob.key));
-        CopyMemory(key_blob.key, key_bytes.c_str(), min(key_bytes.size(), key_size));
+        CopyMemory(key_blob.key, key_bytes.c_str(), std::min(key_bytes.size(), key_size));
         if (CryptImportKey(hProv, (BYTE*)&key_blob, sizeof(key_blob), 0, CRYPT_IPSEC_HMAC_KEY, &hKey)) {
           if (CryptCreateHash(hProv, CALG_HMAC, hKey, 0, &hHmac)) {
             if (CryptSetHashParam(hHmac, HP_HMAC_INFO, (BYTE*)&HmacInfo, 0)) {
-              if (CryptHashData(hHmac, (BYTE*)data.c_str(), data.size(), 0)) {
+              if (CryptHashData(hHmac, (BYTE*)data.c_str(), (DWORD)data.size(), 0)) {
                 if (CryptGetHashParam(hHmac, HP_HASHVAL, nullptr, &dwDataLen, 0)) {
                   pbHash = (BYTE*)malloc(dwDataLen);
                   if (pbHash != nullptr) {

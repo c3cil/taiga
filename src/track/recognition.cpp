@@ -1,900 +1,475 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "base/foreach.h"
-#include "base/string.h"
-#include "library/anime_db.h"
-#include "library/anime_episode.h"
-#include "library/anime_util.h"
-#include "taiga/resource.h"
-#include "taiga/settings.h"
-#include "taiga/taiga.h"
-#include "track/media.h"
+#include <anitomy/anitomy/anitomy.h>
+#include <anitomy/anitomy/keyword.h>
+
 #include "track/recognition.h"
 
-RecognitionEngine Meow;
+#include "base/log.h"
+#include "base/string.h"
+#include "media/anime.h"
+#include "media/anime_db.h"
+#include "media/anime_util.h"
+#include "taiga/settings.h"
+#include "track/episode.h"
 
-class Token {
-public:
-  Token() : encloser('\0'), separator('\0'), untouched(true) {}
+namespace track::recognition {
 
-  std::wstring content;
-  wchar_t encloser;
-  wchar_t separator;
-  bool untouched;
-};
-
-RecognitionEngine::RecognitionEngine() {
-  ReadKeyword(audio_keywords,
-      L"2CH, 5.1CH, 5.1, AAC, AC3, DTS, DTS5.1, DTS-ES, DUALAUDIO, DUAL AUDIO, "
-      L"FLAC, MP3, OGG, TRUEHD5.1, VORBIS");
-  ReadKeyword(video_keywords,
-      L"8BIT, 8-BIT, 10BIT, 10-BIT, AVI, DIVX, H264, H.264, HD, HDTV, HI10P, "
-      L"HQ, LQ, RMVB, SD, TS, VFR, WMV, X264, X.264, XVID");
-  ReadKeyword(extra_keywords,
-      L"ASS, BATCH, BD, BLURAY, BLU-RAY, COMPLETE, DIRECTOR'S CUT, DVD, DVD5, "
-      L"DVD9, DVD-R2J, DVDRIP, ENG, ENGLISH, HARDSUB, PS3, R2DVD, R2J, R2JDVD, "
-      L"RAW, REMASTERED, SOFTSUB, SUBBED, SUB, UNCENSORED, UNCUT, VOSTFR, "
-      L"WEBCAST, WIDESCREEN, WS");
-  ReadKeyword(extra_unsafe_keywords,
-      L"END, FINAL, OAV, ONA, OVA");
-  ReadKeyword(version_keywords,
-      L"V0, V2, V3, V4");
-  ReadKeyword(valid_extensions,
-      L"MKV, AVI, MP4, OGM, RM, RMVB, WMV, DIVX, MOV, FLV, MPG, 3GP");
-  ReadKeyword(episode_keywords,
-      L"EPISODE, EP., EP, VOLUME, VOL., VOL, EPS., EPS");
-  ReadKeyword(episode_prefixes,
-      L"EP., EP, E, VOL., VOL, EPS., \x7B2C");
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-anime::Item* RecognitionEngine::MatchDatabase(anime::Episode& episode,
-                                              bool in_list,
-                                              bool reverse,
-                                              bool strict,
-                                              bool check_episode,
-                                              bool check_date,
-                                              bool give_score) {
-  // Reset scores
-  foreach_(it, scores)
-    it->second = 0;
-
-  if (reverse) {
-    foreach_r_(it, AnimeDatabase.items) {
-      if (in_list && !it->second.IsInList())
-        continue;
-      if (Meow.CompareEpisode(episode, it->second, strict, check_episode,
-                              check_date, give_score))
-        return AnimeDatabase.FindItem(episode.anime_id);
-    }
-  } else {
-    foreach_(it, AnimeDatabase.items) {
-      if (in_list && !it->second.IsInList())
-        continue;
-      if (Meow.CompareEpisode(episode, it->second, strict, check_episode,
-                              check_date, give_score))
-        return AnimeDatabase.FindItem(episode.anime_id);
-    }
-  }
-
-  return nullptr;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-bool RecognitionEngine::CompareEpisode(anime::Episode& episode,
-                                       const anime::Item& anime_item,
-                                       bool strict,
-                                       bool check_episode,
-                                       bool check_date,
-                                       bool give_score) {
-  // Leave if title is empty
-  if (episode.clean_title.empty())
-    return false;
-
-  // Leave if not yet aired
-  if (check_date && !anime::IsAiredYet(anime_item))
-    return false;
-
-  bool found = false;
-
-  // Compare with titles
-  if (clean_titles[anime_item.GetId()].empty())
-    UpdateCleanTitles(anime_item.GetId());
-  foreach_(it, clean_titles[anime_item.GetId()]) {
-    found = CompareTitle(*it, episode, anime_item, strict);
-    if (found)
-      break;
-  }
-
-  if (!found) {
-    // Score title in case we need it later on
-    if (give_score)
-      ScoreTitle(episode, anime_item);
-    // Leave if not found
-    return false;
-  }
-
-  // Validate episode number
-  if (check_episode && anime_item.GetEpisodeCount() > 0) {
-    int number = anime::GetEpisodeHigh(episode.number);
-    if (number > anime_item.GetEpisodeCount()) {
-      // Check sequels
-      auto sequel = &anime_item;
-      do {
-        number -= sequel->GetEpisodeCount();
-        sequel = AnimeDatabase.FindSequel(sequel->GetId());
-      } while (sequel && number > sequel->GetEpisodeCount());
-      if (sequel) {
-        episode.anime_id = sequel->GetId();
-        episode.number = ToWstr(number);
-        return true;
-      }
-      // Episode number is out of range
-      return false;
-    }
-  }
-  // Assume episode 1 if matched one-episode series
-  if (episode.number.empty() && anime_item.GetEpisodeCount() == 1)
-    episode.number = L"1";
-
-  episode.anime_id = anime_item.GetId();
-
-  return true;
-}
-
-bool RecognitionEngine::CompareTitle(const std::wstring& anime_title,
-                                     anime::Episode& episode,
-                                     const anime::Item& anime_item,
-                                     bool strict) {
-  // Compare with title + number
-  if (strict && anime_item.GetEpisodeCount() == 1 && !episode.number.empty()) {
-    if (IsEqual(episode.clean_title + episode.number, anime_title)) {
-      episode.title += episode.number;
-      episode.number.clear();
-      return true;
-    }
-  }
-  // Compare with title
-  if (strict) {
-    if (IsEqual(anime_title, episode.clean_title))
-      return true;
-  } else {
-    if (InStr(anime_title, episode.clean_title, 0, true) > -1)
-      return true;
-  }
-
-  return false;
-}
-
-std::multimap<int, int, std::greater<int>> RecognitionEngine::GetScores() {
-  std::multimap<int, int, std::greater<int>> reverse_map;
-
-  foreach_(it, scores) {
-    if (it->second == 0)
-      continue;
-    reverse_map.insert(std::pair<int, int>(it->second, it->first));
-  }
-
-  return reverse_map;
-}
-
-bool RecognitionEngine::ScoreTitle(const anime::Episode& episode,
-                                   const anime::Item& anime_item) {
-  const std::wstring& episode_title = episode.clean_title;
-  const std::wstring& anime_title = clean_titles[anime_item.GetId()].front();
-
-  const int score_bonus_small = 1;
-  const int score_bonus_big = 5;
-  const int score_min = std::abs(static_cast<int>(episode_title.length()) -
-                                 static_cast<int>(anime_title.length()));
-  const int score_max = episode_title.length() + anime_title.length();
-
-  int score = score_max;
-
-  score -= LevenshteinDistance(episode_title, anime_title);
-
-  score += LongestCommonSubsequenceLength(episode_title, anime_title) * 2;
-  score += LongestCommonSubstringLength(episode_title, anime_title) * 4;
-
-  if (score <= score_min)
-    return false;
-
-  if (anime_item.IsInList()) {
-    score += score_bonus_big;
-    switch (anime_item.GetMyStatus()) {
-      case anime::kWatching:
-      case anime::kPlanToWatch:
-        score += score_bonus_small;
-        break;
-    }
-  }
-  switch (anime_item.GetType()) {
-    case anime::kTv:
-      score += score_bonus_small;
-      break;
-  }
-  if (!episode.year.empty()) {
-    if (anime_item.GetDateStart().year == ToInt(episode.year)) {
-      score += score_bonus_big;
-    }
-  }
-
-  if (score > score_min) {
-    scores[anime_item.GetId()] = score;
-    return true;
-  }
-
-  return false;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-bool RecognitionEngine::ExamineTitle(std::wstring title,
-                                     anime::Episode& episode,
-                                     bool examine_inside,
-                                     bool examine_outside,
-                                     bool examine_number,
-                                     bool check_extras,
-                                     bool check_extension) {
+bool Engine::Parse(std::wstring filename, const ParseOptions& parse_options,
+                   anime::Episode& episode) const {
   // Clear previous data
   episode.Clear();
 
-  if (title.empty())
+  // Separate filename from path
+  if (parse_options.parse_path && !parse_options.streaming_media) {
+    if (filename.find_first_of(L"\\/") != filename.npos) {
+      episode.folder = GetPathOnly(filename);
+      filename = GetFileName(filename);
+    }
+  }
+
+  if (filename.empty())
     return false;
 
-  // Remove zero width space character
-  EraseChars(title, L"\u200B");  // TEMP
+  anitomy::Anitomy anitomy_instance;
 
-  // TEMP: Fix "Futsuu no Joshikousei ga [Locodol] Yatte Mita."
-  // We're not going to need this once we upgrade to Anitomy.
-  Replace(title, L"[Locodol]", L"Locodol");
+  // Set Anitomy options
+  if (parse_options.streaming_media)
+    anitomy_instance.options().allowed_delimiters = L" ";
+  Split(taiga::settings.GetRecognitionIgnoredStrings(), L"|",
+        anitomy_instance.options().ignored_strings);
 
-  // Retrieve file name from full path
-  if (title.length() > 2 && title.at(1) == ':' && title.at(2) == '\\') {
-    episode.folder = GetPathOnly(title);
-    title = GetFileName(title);
-  }
-  episode.file = title;
-
-  // Ignore if the file is outside of root folders
-  if (Settings.GetBool(taiga::kSync_Update_OutOfRoot))
-    if (!episode.folder.empty() && !Settings.root_folders.empty())
-      if (!anime::IsInsideRootFolders(episode.folder))
-        return false;
-
-  // Check and trim file extension
-  std::wstring extension = GetFileExtension(title);
-  if (!extension.empty() &&
-      extension.length() < title.length() &&
-      extension.length() <= 5) {
-    if (IsAlphanumeric(extension) &&
-        CheckFileExtension(extension, valid_extensions)) {
-      episode.format = ToUpper_Copy(extension);
-      title.resize(title.length() - extension.length() - 1);
-    } else {
-      if (IsNumeric(extension)) {
-        std::wstring temp = title.substr(0, title.length() - extension.length());
-        foreach_(it, episode_keywords) {
-          if (temp.length() >= it->length() &&
-              title.length() > extension.length() + it->length() &&
-              IsEqual(CharRight(temp, it->length()), *it)) {
-            title.resize(title.length() - extension.length() - it->length() - 1);
-            episode.number = extension;
-            break;
-          }
-        }
-      }
-      if (check_extension && episode.number.empty())
-        return false;
-    }
-  }
-
-  //////////////////////////////////////////////////////////////////////////////
-  // Here we are, entering the world of tokens. Each token has four properties:
-  // * content: Self-explanatory
-  // * encloser: Can be empty or one of these characters: [](){}
-  // * separator: The most common non-alphanumeric character - usually a space
-  //   or an underscore
-  // * untouched: All tokens start out as untouched but lose this property when
-  //   some keyword within is recognized and erased.
-
-  // Tokenize
-  std::vector<Token> tokens;
-  tokens.reserve(4);
-  TokenizeTitle(title, L"[](){}", tokens);
-  if (tokens.empty())
-    return false;
-  title.clear();
-
-  // Examine tokens
-  foreach_(token, tokens) {
-    if (IsTokenEnclosed(*token)) {
-      if (examine_inside)
-        ExamineToken(*token, episode, check_extras);
-    } else {
-      if (examine_outside)
-        ExamineToken(*token, episode, check_extras);
-    }
-  }
-
-  // Tidy up tokens
-  for (size_t i = 1; i < tokens.size() - 1; i++) {
-    // Combine remaining tokens that are enclosed with parentheses - this is
-    // especially useful for titles that include a year value and some other cases
-    if (tokens[i - 1].untouched == false ||
-        tokens[i].untouched == false ||
-        IsTokenEnclosed(tokens[i - 1]) == true ||
-        tokens[i].encloser != '(' ||
-        tokens[i - 1].content.length() < 2) {
-      continue;
-    }
-    tokens[i - 1].content += L"(" + tokens[i].content + L")";
-    if (IsTokenEnclosed(tokens[i + 1]) == false) {
-      tokens[i - 1].content += tokens[i + 1].content;
-      if (tokens[i - 1].separator == '\0')
-        tokens[i - 1].separator = tokens[i + 1].separator;
-      tokens.erase(tokens.begin() + i + 1);
-    }
-    tokens.erase(tokens.begin() + i);
-    i = 0;
-  }
-  for (size_t i = 0; i < tokens.size(); i++) {
-    // Trim separator character from each side of the token
-    wchar_t trim_char[] = {tokens[i].separator, '\0'};
-    Trim(tokens[i].content, trim_char);
-    // Tokens that are too short are now garbage, so we take them out
-    if (tokens[i].content.length() < 2 && !IsNumeric(tokens[i].content)) {
-      tokens.erase(tokens.begin() + i);
-      i--;
-    }
-  }
-
-  //////////////////////////////////////////////////////////////////////////////
-  // Now we apply some logic to decide on the title and the group name
-
-  int group_index = -1;
-  int title_index = -1;
-  std::vector<int> group_vector;
-  std::vector<int> title_vector;
-  for (size_t i = 0; i < tokens.size(); i++) {
-    if (IsTokenEnclosed(tokens[i])) {
-      group_vector.push_back(i);
-    } else {
-      title_vector.push_back(i);
-    }
-  }
-
-  // Choose the first free token as the title, if there is one
-  if (title_vector.size() > 0) {
-    title_index = title_vector[0];
-    title_vector.erase(title_vector.begin());
-  } else {
-    // Choose the second enclosed token as the title, if there is more than one
-    // (it is more probable that the group name comes before the title)
-    if (group_vector.size() > 1) {
-      title_index = group_vector[1];
-      group_vector.erase(group_vector.begin() + 1);
-    // Choose the first enclosed token as the title, if there is one
-    // (which means that there is no group name available)
-    } else if (group_vector.size() > 0) {
-      title_index = group_vector[0];
-      group_vector.erase(group_vector.begin());
-    }
-  }
-
-  // Choose the first enclosed untouched token as the group name
-  for (size_t i = 0; i < group_vector.size(); i++) {
-    // Here we assume that group names are never enclosed with other keywords
-    if (tokens[group_vector[i]].untouched) {
-      group_index = group_vector[i];
-      group_vector.erase(group_vector.begin() + i);
-      break;
-    }
-  }
-  // Group name might not be enclosed at all
-  // This is a special case for THORA releases, where the group name is at the end
-  if (group_index == -1) {
-    if (title_vector.size() > 0) {
-      group_index = title_vector.back();
-      title_vector.erase(title_vector.end() - 1);
-    }
-  }
-
-  // Do we have a title?
-  if (title_index > -1) {
-    // Replace the separator with a space character
-    ReplaceChar(tokens[title_index].content, tokens[title_index].separator, ' ');
-    // Do some clean-up
-    Trim(tokens[title_index].content, L" -");
-    // Set the title
-    title = tokens[title_index].content;
-    tokens[title_index].content.clear();
-    tokens[title_index].untouched = false;
-  }
-
-  // Do we have a group name?
-  if (group_index > -1) {
-    // We don't want to lose any character if the token is enclosed, because
-    // those characters can be a part of the group name itself
-    if (!IsTokenEnclosed(tokens[group_index])) {
-      // Replace the separator with a space character
-      ReplaceChar(tokens[group_index].content, tokens[group_index].separator, ' ');
-      // Do some clean-up
-      Trim(tokens[group_index].content, L" -");
-    }
-    // Set the group name
-    episode.group = tokens[group_index].content;
-    // We don't clear token content here, becuse we'll be checking it for
-    // episode number later on
-  }
-
-  //////////////////////////////////////////////////////////////////////////////
-  // Get episode number and version, if available
-
-  if (examine_number) {
-    // Check remaining tokens first
-    foreach_(token, tokens) {
-      if (IsEpisodeFormat(token->content, episode, token->separator)) {
-        token->untouched = false;
-        break;
-      }
-    }
-
-    // Check title
-    if (episode.number.empty()) {
-      // Split into words
-      std::vector<std::wstring> words;
-      words.reserve(4);
-      Tokenize(title, L" ", words);
-      if (words.empty())
-        return false;
-      title.clear();
-      int number_index = -1;
-
-      // Check for episode number format, starting with the second word
-      for (size_t i = 1; i < words.size(); i++) {
-        if (IsEpisodeFormat(words[i], episode)) {
-          number_index = static_cast<int>(i);
-          break;
-        }
-      }
-
-      // Set the first valid numeric token as episode number
-      if (episode.number.empty()) {
-        foreach_(token, tokens) {
-          if (IsNumeric(token->content)) {
-            episode.number = token->content;
-            if (ValidateEpisodeNumber(episode)) {
-              token->untouched = false;
-              break;
-            }
-          }
-        }
-      }
-
-      // Set the lastmost number that follows a '-'
-      if (episode.number.empty() && words.size() > 2) {
-        for (size_t i = words.size() - 2; i > 0; i--) {
-          if (words[i] == L"-" && IsNumeric(words[i + 1])) {
-            episode.number = words[i + 1];
-            if (ValidateEpisodeNumber(episode)) {
-              number_index = static_cast<int>(i) + 1;
-              break;
-            }
-          }
-        }
-      }
-
-      // Set the lastmost number as a last resort
-      if (episode.number.empty()) {
-        for (size_t i = words.size() - 1; i > 0; i--) {
-          if (IsNumeric(words[i])) {
-            episode.number = words[i];
-            if (ValidateEpisodeNumber(episode)) {
-              // Discard and give up if movie or season number (episode numbers
-              // cannot precede them)
-              if (i > 1 &&
-                  (IsEqual(words[i - 1], L"Season") ||
-                   IsEqual(words[i - 1], L"Movie")) &&
-                  !IsCountingWord(words[i - 2])) {
-                episode.number.clear();
-                number_index = -1;
-                break;
-              }
-
-              number_index = static_cast<int>(i);
-              break;
-            }
-          }
-        }
-      }
-
-      // Build title and name
-      for (int i = 0; i < static_cast<int>(words.size()); i++) {
-        if (number_index == -1 || i < number_index) {
-          // Ignore episode keywords
-          if (i == number_index - 1 && CompareKeys(words[i], episode_keywords))
-            continue;
-          AppendKeyword(title, words[i]);
-        } else if (i > number_index) {
-          AppendKeyword(episode.name, words[i]);
-        }
-      }
-
-      // Clean up
-      TrimRight(title, L" -");
-      TrimLeft(episode.name, L" -");
-      if (StartsWith(episode.name, L"'") && EndsWith(episode.name, L"'"))
-        Trim(episode.name, L"'");
-      TrimLeft(episode.name, L"\u300C");  // Japanese left quotation mark
-      TrimRight(episode.name, L"\u300D");  // Japanese right quotation mark
-    }
-  }
-
-  //////////////////////////////////////////////////////////////////////////////
-
-  // Check if the group token is still untouched
-  if (group_index > -1 && !tokens[group_index].untouched) {
-    episode.group.clear();
-    foreach_(token, tokens) {
-      // Set the first available untouched token as group name
-      if (!token->content.empty() && token->untouched) {
-        episode.group = token->content;
-        break;
-      }
-    }
-  }
-  // Set episode name as group name if necessary
-  if (episode.group.empty() && episode.name.length() > 2) {
-    if (StartsWith(episode.name, L"(") && EndsWith(episode.name, L")")) {
-      episode.group = episode.name.substr(1, episode.name.length() - 2);
-      episode.name.clear();
-    }
-  }
-
-  // Examine remaining tokens once more
-  foreach_(token, tokens)
-    if (!token->content.empty())
-      ExamineToken(*token, episode, true);
-
-  //////////////////////////////////////////////////////////////////////////////
-
-  EraseRight(title, L" S01");
-
-  // Set the final title, hopefully name of the anime
-  episode.title = title;
-  episode.clean_title = title;
-  CleanTitle(episode.clean_title);
-
-  return !title.empty();
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void RecognitionEngine::ExamineToken(Token& token, anime::Episode& episode,
-                                     bool compare_extras) {
-  // Split into words. The most common non-alphanumeric character is the
-  // separator.
-  std::vector<std::wstring> words;
-  token.separator = GetMostCommonCharacter(token.content);
-  Split(token.content, std::wstring(1, token.separator), words);
-
-  // Revert if there are words that are too short. This prevents splitting some
-  // group names (e.g. "m.3.3.w") and keywords (e.g. "H.264").
-  if (IsTokenEnclosed(token)) {
-    foreach_(word, words) {
-      if (word->length() == 1) {
-        words.clear();
-        words.push_back(token.content);
-        break;
-      }
-    }
-  }
-
-  // Compare with keywords
-  foreach_(word, words) {
-    Trim(*word);
-    if (word->empty())
-      continue;
-    #define RemoveWordFromToken(b) { \
-      Erase(token.content, *word, b); token.untouched = false; }
-
-    // Checksum
-    if (episode.checksum.empty() && word->length() == 8 && IsHex(*word)) {
-      episode.checksum = *word;
-      RemoveWordFromToken(false);
-    // Video resolution
-    } else if (episode.resolution.empty() && IsResolution(*word)) {
-      episode.resolution = *word;
-      RemoveWordFromToken(false);
-    // Video info
-    } else if (CompareKeys(*word, video_keywords)) {
-      AppendKeyword(episode.video_type, *word);
-      RemoveWordFromToken(true);
-    // Audio info
-    } else if (CompareKeys(*word, audio_keywords)) {
-      AppendKeyword(episode.audio_type, *word);
-      RemoveWordFromToken(true);
-    // Version
-    } else if (episode.version.empty() && CompareKeys(*word, version_keywords)) {
-      episode.version.push_back(word->at(word->length() - 1));
-      RemoveWordFromToken(true);
-    // Extras
-    } else if (compare_extras && CompareKeys(*word, extra_keywords)) {
-      AppendKeyword(episode.extras, *word);
-      RemoveWordFromToken(true);
-    } else if (compare_extras && CompareKeys(*word, extra_unsafe_keywords)) {
-      AppendKeyword(episode.extras, *word);
-      if (IsTokenEnclosed(token))
-        RemoveWordFromToken(true);
-    }
-
-    #undef RemoveWordFromToken
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-// Helper functions
-
-void RecognitionEngine::AppendKeyword(std::wstring& str,
-                                      const std::wstring& keyword) {
-  AppendString(str, keyword, L" ");
-}
-
-bool RecognitionEngine::CompareKeys(const std::wstring& str,
-                                    const std::vector<std::wstring>& keys) {
-  if (!str.empty())
-    foreach_(key, keys)
-      if (IsEqual(str, *key))
-        return true;
-
-  return false;
-}
-
-void RecognitionEngine::CleanTitle(std::wstring& title) {
-  if (title.empty())
-    return;
-
-  EraseUnnecessary(title);
-  TransliterateSpecial(title);
-  ErasePunctuation(title, true);
-}
-
-void RecognitionEngine::UpdateCleanTitles(int anime_id) {
-  auto anime_item = AnimeDatabase.FindItem(anime_id);
-
-  clean_titles[anime_id].clear();
-
-  // Main title
-  clean_titles[anime_id].push_back(anime_item->GetTitle());
-  CleanTitle(clean_titles[anime_id].back());
-
-  // English title
-  if (!anime_item->GetEnglishTitle().empty()) {
-    clean_titles[anime_id].push_back(anime_item->GetEnglishTitle());
-    CleanTitle(clean_titles[anime_id].back());
-  }
-
-  // Synonyms
-  if (!anime_item->GetUserSynonyms().empty()) {
-    foreach_(it, anime_item->GetUserSynonyms()) {
-      clean_titles[anime_id].push_back(*it);
-      CleanTitle(clean_titles[anime_id].back());
-    }
-  }
-  if (!anime_item->GetSynonyms().empty()) {
-    auto synonyms = anime_item->GetSynonyms();
-    foreach_(it, synonyms) {
-      clean_titles[anime_id].push_back(*it);
-      CleanTitle(clean_titles[anime_id].back());
-    }
-  }
-}
-
-void RecognitionEngine::EraseUnnecessary(std::wstring& str) {
-  EraseLeft(str, L"the ", true);
-  Replace(str, L" the ", L" ", false, true);
-  Erase(str, L"episode ", true);
-  Erase(str, L" ep.", true);
-  Replace(str, L" specials", L" special", false, true);
-}
-
-// TODO: make faster
-void RecognitionEngine::TransliterateSpecial(std::wstring& str) {
-  // Character equivalencies
-  ReplaceChar(str, L'\u00E9', L'e');  // small e acute accent
-  ReplaceChar(str, L'\uFF0F', L'/');  // unicode slash
-  ReplaceChar(str, L'\uFF5E', L'~');  // unicode tilde
-  ReplaceChar(str, L'\u223C', L'~');  // unicode tilde 2
-  ReplaceChar(str, L'\u301C', L'~');  // unicode tilde 3
-  ReplaceChar(str, L'\uFF1F', L'?');  // unicode question mark
-  ReplaceChar(str, L'\uFF01', L'!');  // unicode exclamation point
-  ReplaceChar(str, L'\u00D7', L'x');  // multiplication symbol
-  ReplaceChar(str, L'\u2715', L'x');  // multiplication symbol 2
-
-  // A few common always-equivalent romanizations
-  Replace(str, L"\u014C", L"Ou");  // O macron
-  Replace(str, L"\u014D", L"ou");  // o macron
-  Replace(str, L"\u016B", L"uu");  // u macron
-  Replace(str, L" wa ", L" ha ");  // hepburn to wapuro
-  Replace(str, L" e ", L" he ");  // hepburn to wapuro
-  Replace(str, L" o ", L" wo ");  // hepburn to wapuro
-
-  // Abbreviations
-  Replace(str, L" & ", L" and ", true, false);
-}
-
-bool RecognitionEngine::IsEpisodeFormat(const std::wstring& str,
-                                        anime::Episode& episode,
-                                        const wchar_t separator) {
-  unsigned int numstart, i, j;
-
-  // Find first number
-  for (numstart = 0; numstart < str.length() && !IsNumeric(str.at(numstart)); numstart++);
-  if (numstart == str.length())
-    return false;
-
-  // Check for episode prefix
-  if (numstart > 0)
-    if (!CompareKeys(str.substr(0, numstart), episode_prefixes))
+  if (!anitomy_instance.Parse(filename)) {
+    LOGD(L"Could not parse filename: {}", filename);
+    if (episode.folder.empty())  // If not, perhaps we can parse the path later on
       return false;
-
-  for (i = numstart + 1; i < str.length(); i++) {
-    if (!IsNumeric(str.at(i))) {
-      // *#-#*
-      if (str.at(i) == '-' || str.at(i) == '&') {
-        if (i == str.length() - 1 || !IsNumeric(str.at(i + 1)))
-          return false;
-        for (j = i + 1; j < str.length() && IsNumeric(str.at(j)); j++);
-        episode.number = str.substr(numstart, j - numstart);
-        // *#-#*v#
-        if (j < str.length() - 1 && (str.at(j) == 'v' || str.at(j) =='V')) {
-          numstart = i + 1;
-          continue;
-        } else {
-          return true;
-        }
-
-      // v#
-      } else if (str.at(i) == 'v' || str.at(i) == 'V') {
-        if (episode.number.empty()) {
-          if (i == str.length() - 1 || !IsNumeric(str.at(i + 1))) return false;
-          episode.number = str.substr(numstart, i - numstart);
-        }
-        episode.version = str.substr(i + 1);
-        return true;
-
-      // *# of #*
-      } else if (str.at(i) == separator) {
-        if (str.length() < i + 5)
-          return false;
-        if (str.at(i + 1) == 'o' &&
-            str.at(i + 2) == 'f' &&
-            str.at(i + 3) == separator) {
-          episode.number = str.substr(numstart, i - numstart);
-          return true;
-        }
-
-      // *#x#*
-      } else if (str.at(i) == 'x') {
-        if (i == str.length() - 1 || !IsNumeric(str.at(i + 1)))
-          return false;
-        for (j = i + 1; j < str.length() && IsNumeric(str.at(j)); j++);
-        episode.number = str.substr(i + 1, j - i - 1);
-        if (ToInt(episode.number) < 100) {
-          return true;
-        } else {
-          episode.number.clear();
-          return false;
-        }
-
-      // Japanese counter
-      } else if (str.at(i) == L'\u8A71') {
-        episode.number = str.substr(numstart, i - 1);
-        return true;
-
-      } else {
-        episode.number.clear();
-        return false;
-      }
-    }
   }
 
-  // [prefix]#*
-  if (numstart > 0 && episode.number.empty()) {
-    episode.number = str.substr(numstart, str.length() - numstart);
-    if (!ValidateEpisodeNumber(episode))
-      return false;
-    return true;
-  }
+  episode.set_elements(anitomy_instance.elements());
 
-  // *#
-  return false;
-}
-
-bool RecognitionEngine::IsResolution(const std::wstring& str) {
-  return anime::TranslateResolution(str, true) > 0;
-}
-
-bool RecognitionEngine::IsCountingWord(const std::wstring& str) {
-  if (str.length() > 2) {
-    if (EndsWith(str, L"th") || EndsWith(str, L"nd") || EndsWith(str, L"rd") || EndsWith(str, L"st") ||
-        EndsWith(str, L"TH") || EndsWith(str, L"ND") || EndsWith(str, L"RD") || EndsWith(str, L"ST")) {
-      if (IsNumeric(str.substr(0, str.length() - 2)) ||
-          IsEqual(str, L"FIRST") ||
-          IsEqual(str, L"SECOND") ||
-          IsEqual(str, L"THIRD") ||
-          IsEqual(str, L"FOURTH") ||
-          IsEqual(str, L"FIFTH")) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-bool RecognitionEngine::IsTokenEnclosed(const Token& token) {
-  return token.encloser == '[' ||
-         token.encloser == '(' ||
-         token.encloser == '{';
-}
-
-void RecognitionEngine::ReadKeyword(std::vector<std::wstring>& output,
-                                    const std::wstring& input) {
-  Split(input, L", ", output);
-}
-
-size_t RecognitionEngine::TokenizeTitle(const std::wstring& str,
-                                        const std::wstring& delimiters,
-                                        std::vector<Token>& tokens) {
-  size_t index_begin = str.find_first_not_of(delimiters);
-
-  while (index_begin != std::wstring::npos) {
-    size_t index_end = str.find_first_of(delimiters, index_begin + 1);
-    tokens.resize(tokens.size() + 1);
-    if (index_end == std::wstring::npos) {
-      tokens.back().content = str.substr(index_begin);
-      break;
-    } else {
-      tokens.back().content = str.substr(index_begin, index_end - index_begin);
-      if (index_begin > 0)
-        tokens.back().encloser = str.at(index_begin - 1);
-      index_begin = str.find_first_not_of(delimiters, index_end + 1);
-    }
-  }
-
-  return tokens.size();
-}
-
-bool RecognitionEngine::ValidateEpisodeNumber(anime::Episode& episode) {
-  int number = ToInt(episode.number);
-
-  if (number <= 0 || number > 1000) {
-    if (number > 1950 && number < 2050)
-      episode.year = episode.number;
-    episode.number.clear();
-    return false;
-  }
+  ExtendAnimeTitle(episode);
 
   return true;
 }
+
+int Engine::Identify(anime::Episode& episode, bool give_score,
+                     const MatchOptions& match_options) {
+  std::set<int> anime_ids;
+
+  InitializeTitles();
+
+  auto valide_ids = [&](anime::Episode& episode) {
+    for (auto it = anime_ids.begin(); it != anime_ids.end(); ) {
+      if (!ValidateOptions(episode, *it, match_options, true)) {
+        it = anime_ids.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  };
+
+  auto look_up_merged_title = [&](
+      const std::initializer_list<anitomy::ElementCategory>& elements) {
+    anime::Episode episode_merged_title(episode);
+    auto merged_title = episode.anime_title();
+    for (const auto& element : elements) {
+      merged_title += L" " + episode.elements().get(element);
+      episode_merged_title.elements().erase(element);
+    }
+    episode_merged_title.set_anime_title(merged_title);
+    LookUpTitle(episode_merged_title.anime_title(), anime_ids);
+    valide_ids(episode_merged_title);
+    if (!anime_ids.empty()) {
+      std::swap(episode_merged_title, episode);
+      LOGD(L"Merged title lookup succeeded: {}", episode.anime_title());
+    }
+  };
+
+  if (!match_options.streaming_media) {
+    // Look up anime title + episode number + episode title
+    if (!episode.elements().empty(anitomy::kElementEpisodeNumber) &&
+        !episode.elements().empty(anitomy::kElementEpisodeTitle)) {
+      static const auto elements =
+          {anitomy::kElementEpisodeNumber, anitomy::kElementEpisodeTitle};
+      look_up_merged_title(elements);
+    }
+    // Look up anime title + episode number
+    if (!episode.elements().empty(anitomy::kElementEpisodeNumber) &&
+        (episode.elements().empty(anitomy::kElementFileExtension) ||
+         !episode.elements().empty(anitomy::kElementAnimeType))) {
+      static const auto elements = {anitomy::kElementEpisodeNumber};
+      look_up_merged_title(elements);
+    }
+  }
+
+  // Look up anime title
+  if (anime_ids.empty()) {
+    LookUpTitle(episode.anime_title(), anime_ids);
+    valide_ids(episode);
+  }
+
+  // Look up parent directories
+  if (anime_ids.empty() && !episode.folder.empty() &&
+      taiga::settings.GetRecognitionLookupParentDirectories() &&
+      episode.anime_type().empty()) {
+    anime::Episode episode_from_directory(episode);
+    episode_from_directory.elements().erase(anitomy::kElementAnimeTitle);
+    if (GetTitleFromPath(episode_from_directory)) {
+      LookUpTitle(episode_from_directory.anime_title(), anime_ids);
+      valide_ids(episode_from_directory);
+      if (!anime_ids.empty()) {
+        std::swap(episode_from_directory, episode);
+        LOGD(L"Parent directory lookup succeeded: {} -> {}",
+             episode_from_directory.anime_title(),
+             episode.anime_title());
+      }
+    }
+  }
+
+  // Figure out which ID is the one we're looking for
+  if (anime::IsValidId(episode.anime_id)) {
+    // We had a redirection while validating IDs
+    if (!anime::db.Find(episode.anime_id, false)) {
+      episode.anime_id = anime::ID_UNKNOWN;
+      LOGD(L"Redirection failed, because destination ID is not available in the "
+           L"database.");
+    }
+  } else if (anime_ids.size() == 1) {
+    episode.anime_id = *anime_ids.begin();
+  } else if (anime_ids.size() > 1) {
+    episode.anime_id = ScoreTitle(episode, anime_ids, match_options);
+  } else if (anime_ids.empty() && give_score) {
+    ScoreTitle(episode, anime_ids, match_options);
+  }
+
+  // Post-processing
+  if (anime::IsValidId(episode.anime_id)) {
+    // Here we check the element rather than episode_number(), in order to
+    // prevent overwriting episode 0.
+    if (episode.elements().empty(anitomy::kElementEpisodeNumber)) {
+      if (!episode.file_extension().empty()) {
+        episode.set_episode_number(1);
+      } else if (episode.elements().empty(anitomy::kElementVolumeNumber)) {
+        auto anime_item = anime::db.Find(episode.anime_id);
+        if (anime_item) {
+          const int last_episode = [&anime_item]() {
+            switch (anime_item->GetAiringStatus()) {
+              case anime::SeriesStatus::FinishedAiring:
+                return anime_item->GetEpisodeCount();
+              case anime::SeriesStatus::Airing:
+                return anime::GetLastEpisodeNumber(*anime_item);
+              default:
+                return 0;
+            }
+          }();
+          if (last_episode)
+            episode.set_episode_number_range({1, last_episode});
+        }
+      }
+    }
+  }
+
+  return episode.anime_id;
+}
+
+bool Engine::Search(const std::wstring& title, std::vector<int>& anime_ids) {
+  anime::Episode episode;
+  episode.set_anime_title(title);
+
+  std::set<int> empty_set;
+  track::recognition::MatchOptions default_options;
+
+  InitializeTitles();
+
+  ScoreTitle(episode, empty_set, default_options);
+
+  for (const auto& score : scores_) {
+    anime_ids.push_back(score.first);
+  }
+
+  return !anime_ids.empty();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void Engine::InitializeTitles() {
+  static bool initialized = false;
+
+  if (!initialized) {
+    initialized = true;
+    for (const auto& it : anime::db.items) {
+      UpdateTitles(it.second);
+    }
+
+    ReadRelations();
+  }
+}
+
+void Engine::UpdateTitles(const anime::Item& anime_item, bool erase_ids) {
+  const int anime_id = anime_item.GetId();
+
+  db_[anime_id].normal_titles.clear();
+  db_[anime_id].trigrams.clear();
+
+  if (erase_ids) {
+    auto erase_id = [&anime_id](Titles::container_t& titles) {
+      for (auto& title : titles) {
+        title.second.erase(anime_id);
+      }
+    };
+    erase_id(titles_.alternative);
+    erase_id(titles_.main);
+    erase_id(titles_.user);
+    erase_id(normal_titles_.alternative);
+    erase_id(normal_titles_.main);
+    erase_id(normal_titles_.user);
+  }
+
+  auto update_title = [&](std::wstring title,
+                          Titles::container_t& titles,
+                          Titles::container_t& normal_titles) {
+    if (!title.empty()) {
+      Normalize(title, kNormalizeForTrigrams, false);
+      trigram_container_t trigrams;
+      GetTrigrams(title, trigrams);
+      db_[anime_id].trigrams.push_back(trigrams);
+      db_[anime_id].normal_titles.push_back(title);
+
+      Normalize(title, kNormalizeForLookup, true);
+      titles[title].insert(anime_id);
+
+      Normalize(title, kNormalizeFull, true);
+      normal_titles[title].insert(anime_id);
+    }
+  };
+
+  update_title(anime_item.GetTitle(), titles_.main, normal_titles_.main);
+  update_title(anime_item.GetEnglishTitle(), titles_.main, normal_titles_.main);
+  update_title(anime_item.GetJapaneseTitle(), titles_.main, normal_titles_.main);
+
+  const auto& date = anime_item.GetDateStart();
+  if (anime::IsValidDate(date)) {
+    std::wstring year = ToWstr(date.year());
+    if (anime_item.GetTitle().find(year) == std::wstring::npos) {
+      update_title(anime_item.GetTitle() + L" (" + year + L")",
+                   titles_.alternative, normal_titles_.alternative);
+    }
+  }
+
+  for (const auto& synonym : anime_item.GetSynonyms()) {
+    update_title(synonym, titles_.alternative, normal_titles_.alternative);
+  }
+  for (const auto& synonym : anime_item.GetUserSynonyms()) {
+    update_title(synonym, titles_.user, normal_titles_.user);
+  }
+}
+
+int Engine::LookUpTitle(std::wstring title, std::set<int>& anime_ids) const {
+  int anime_id = anime::ID_UNKNOWN;
+
+  auto find_title = [&](const std::wstring& title,
+                        const Titles::container_t& container) {
+    if (!anime::IsValidId(anime_id)) {
+      auto it = container.find(title.c_str());
+      if (it != container.end()) {
+        anime_ids.insert(it->second.begin(), it->second.end());
+        if (anime_ids.size() == 1)
+          anime_id = *anime_ids.begin();
+      }
+    }
+  };
+
+  Normalize(title, kNormalizeForLookup, false);
+  find_title(title, titles_.user);
+  find_title(title, titles_.main);
+  find_title(title, titles_.alternative);
+
+  if (anime_ids.size() == 1)
+    return anime_id;
+
+  Normalize(title, kNormalizeFull, true);
+  find_title(title, normal_titles_.user);
+  find_title(title, normal_titles_.main);
+  find_title(title, normal_titles_.alternative);
+
+  return anime_id;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void Engine::ExtendAnimeTitle(anime::Episode& episode) const {
+  if (episode.anime_title().empty())
+    return;
+
+  // We need this because we don't have anime relation data. Otherwise we could
+  // jump to a sequel after matching the first season of a series.
+  const auto anime_season = episode.anime_season();
+  if (anime_season > 1) {  // No need to append for the first season
+    // The word "Season" is added for clarity; it's going to be erased in the
+    // normalization process.
+    episode.set_anime_title(episode.anime_title() +
+                            L" Season " + ToWstr(anime_season));
+  }
+
+  // @TEMP: Handle cases such as "2nd Season Part 2" and "Second Season OVA".
+  // Remove once the issue is handled by Anitomy. See issues #748 and #960 for
+  // more information.
+  if (anime_season > 1) {
+    if (StartsWith(episode.episode_title(), L"Part ") ||
+        StartsWith(episode.episode_title(), L"Cour ")) {
+      episode.set_anime_title(episode.anime_title() + L" " +
+                              episode.episode_title());
+      episode.elements().erase(anitomy::kElementEpisodeTitle);
+    }
+    if (!episode.anime_type().empty() &&
+        !EndsWith(episode.anime_title(), episode.anime_type())) {
+      episode.set_anime_title(episode.anime_title() + L" " +
+                              episode.anime_type());
+    }
+  }
+
+  // Some anime share the same title, and they're differentiated by their airing
+  // date. We also come across year values in batch releases, where they appear
+  // as additional metadata.
+  // As it turns out, these numbers aren't always reliable as a means to discard
+  // anime entries. So we make do with appending the value to the title, which
+  // handles the first use case at the expense of complicating the second one.
+  const auto anime_year = episode.anime_year();
+  if (anime_year > 0) {
+    episode.set_anime_title(episode.anime_title() +
+                            L" (" + ToWstr(anime_year) + L")");
+  }
+
+  // @TEMP: Remove once we're able to redirect fractional episode numbers.
+  if (!episode.elements().empty(anitomy::kElementEpisodeNumber)) {
+    const auto episode_number = episode.elements().get(anitomy::kElementEpisodeNumber);
+    if (episode_number.find(L'.') != episode_number.npos) {
+      episode.set_anime_title(episode.anime_title() +
+                              L" Episode " + episode_number);
+      episode.elements().erase(anitomy::kElementEpisodeNumber);
+    }
+  }
+}
+
+bool Engine::GetTitleFromPath(anime::Episode& episode) {
+  if (episode.folder.empty())
+    return false;
+
+  std::wstring path = episode.folder;
+
+  for (const auto& library_folder : taiga::settings.GetLibraryFolders()) {
+    if (StartsWith(path, library_folder)) {
+      path.erase(0, library_folder.size());
+      break;
+    }
+  }
+
+  Trim(path, L"\\/");
+  std::vector<std::wstring> directories;
+  Tokenize(path, L"\\/", directories);
+
+  auto is_invalid_string = [](std::wstring str) {
+    if (str.find(L':') != str.npos)  // drive letter
+      return true;
+    static std::set<std::wstring> invalid_strings{
+      L"ANIME", L"DOWNLOAD", L"DOWNLOADS", L"EXTRA", L"EXTRAS",
+    };
+    ToUpper(str);
+    if (invalid_strings.count(str) > 0)
+      return true;
+    anitomy::keyword_manager.Normalize(str);
+    anitomy::ElementCategory category = anitomy::kElementUnknown;
+    anitomy::KeywordOptions options;
+    return anitomy::keyword_manager.Find(str, category, options);
+  };
+
+  auto get_season_number = [](const std::wstring& str) {
+    anitomy::Anitomy anitomy_instance;
+    anitomy_instance.options().parse_episode_number = false;
+    anitomy_instance.options().parse_episode_title = false;
+    anitomy_instance.options().parse_file_extension = false;
+    anitomy_instance.options().parse_release_group = false;
+    anitomy_instance.Parse(str);
+    auto it = anitomy_instance.elements().find(anitomy::kElementAnimeSeason);
+    if (it != anitomy_instance.elements().end())
+      if (anitomy_instance.elements().empty(anitomy::kElementAnimeTitle))
+        return ToInt(it->second);
+    return 0;
+  };
+
+  int current_depth = 0;
+  const int max_allowed_depth = 1;
+
+  for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
+    if (current_depth++ > max_allowed_depth)
+      break;
+    const auto& directory = *it;
+    if (directory.empty() || is_invalid_string(directory))
+      break;
+    int number = get_season_number(directory);
+    if (number) {
+      if (!episode.anime_season())
+        episode.set_anime_season(number);
+    } else {
+      episode.set_anime_title(directory);
+      break;
+    }
+  }
+
+  if (episode.anime_title().empty()) {
+    return false;
+  } else {
+    // We're parsing the directory name in case it looks like
+    // "[Fansub] Anime Title [Stuff]" rather than just "Anime Title".
+    anitomy::Anitomy anitomy_instance;
+    anitomy_instance.options().parse_episode_number = false;
+    anitomy_instance.options().parse_episode_title = false;
+    anitomy_instance.options().parse_file_extension = false;
+    anitomy_instance.options().parse_release_group = true;
+    if (anitomy_instance.Parse(episode.anime_title())) {
+      auto& elements = anitomy_instance.elements();
+      const auto valid_elements = {
+        anitomy::kElementAnimeTitle,
+        anitomy::kElementAnimeYear
+      };
+      for (const auto& element : valid_elements) {
+        if (!elements.empty(element))
+          episode.SetElementValue(element, elements.get(element));
+      }
+    }
+  }
+
+  auto find_number_in_string = [](const std::wstring& str) {
+    auto it = std::find_if(str.begin(), str.end(), IsNumericChar);
+    return it == str.end() ? str.npos : (it - str.begin());
+  };
+
+  if (episode.elements().empty(anitomy::kElementEpisodeNumber)) {
+    const auto& filename = episode.file_name();
+    auto pos = find_number_in_string(filename);
+    if (pos == 0)  // begins with a number (e.g. "01.mkv", "02 - Title.mkv")
+      episode.set_episode_number(ToInt(filename.substr(pos)));
+  }
+
+  ExtendAnimeTitle(episode);
+
+  return true;
+}
+
+}  // namespace track::recognition

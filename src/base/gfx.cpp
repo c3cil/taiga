@@ -1,33 +1,29 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <windows.h>
-#include <gdiplus.h>
+#include <algorithm>
+#include <memory>
 
-#include "gfx.h"
+#include <windows/win/gdi_plus.h>
 
-win::GdiPlus GdiPlus;
+#include "base/gfx.h"
 
 namespace base {
-
-Image::Image()
-    : data(0) {
-}
 
 bool Image::Load(const std::wstring& path) {
   ::DeleteObject(dc.DetachBitmap());
@@ -55,7 +51,19 @@ bool Image::Load(const std::wstring& path) {
   return true;
 }
 
+static win::GdiPlus* GdiPlus() {
+  static const auto gdi_plus = std::make_unique<win::GdiPlus>();
+  return gdi_plus.get();
+}
+
 }  // namespace base
+
+////////////////////////////////////////////////////////////////////////////////
+
+HBITMAP LoadImage(const std::wstring& file, UINT width, UINT height) {
+  const auto gdi_plus = base::GdiPlus();
+  return gdi_plus ? gdi_plus->LoadImage(file, width, height) : nullptr;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -90,7 +98,7 @@ int GetTextHeight(HDC hdc) {
 
 int GetTextWidth(HDC hdc, const std::wstring& text) {
   SIZE size = {0};
-  GetTextExtentPoint32(hdc, text.c_str(), text.size(), &size);
+  GetTextExtentPoint32(hdc, text.c_str(), static_cast<int>(text.size()), &size);
   return size.cx;
 }
 
@@ -116,6 +124,38 @@ BOOL GradientRect(HDC hdc, const LPRECT lpRect, DWORD dwColor1, DWORD dwColor2,
                          static_cast<ULONG>(bVertical));
 }
 
+BOOL DrawIconResource(int icon_id, HDC hdc, win::Rect& rect,
+                      bool center_x, bool center_y) {
+  const auto avialable_icons = {128, 64, 48, 32, 16};
+  const int available_width = rect.Width();
+  const int available_height = rect.Height();
+
+  int icon_size = 0;
+  for (const auto icon_width : avialable_icons) {
+    if (available_width >= icon_width) {
+      icon_size = icon_width;
+      break;
+    }
+  }
+
+  HICON icon = reinterpret_cast<HICON>(LoadImage(GetModuleHandle(nullptr),
+      MAKEINTRESOURCE(icon_id), IMAGE_ICON, icon_size, icon_size, LR_SHARED));
+
+  if (icon && icon_size) {
+    if (center_x)
+      rect.left += (available_width - icon_size) / 2;
+    if (center_y)
+      rect.top += (available_height - icon_size) / 2;
+    rect.right = rect.left + icon_size;
+    rect.bottom = rect.top + icon_size;
+
+    return DrawIconEx(hdc, rect.left, rect.top, icon, icon_size, icon_size,
+                      0, nullptr, DI_NORMAL);
+  }
+
+  return FALSE;
+}
+
 BOOL DrawProgressBar(HDC hdc, const LPRECT lpRect, DWORD dwColor1, DWORD dwColor2,
                      DWORD dwColor3) {
   // Draw bottom rect
@@ -134,9 +174,10 @@ BOOL DrawProgressBar(HDC hdc, const LPRECT lpRect, DWORD dwColor1, DWORD dwColor
 ////////////////////////////////////////////////////////////////////////////////
 
 COLORREF HexToARGB(const std::wstring& text) {
-  int i = text.length() - 6;
-  if (i < 0)
+  if (text.length() < 6)
     return 0;
+
+  const size_t i = text.length() - 6;
 
   unsigned int r, g, b;
   r = wcstoul(text.substr(i + 0, 2).c_str(), NULL, 16);
@@ -216,8 +257,8 @@ int ScaleY(int value) {
 }
 
 void RgbToHsv(float r, float g, float b, float& h, float& s, float& v) {
-  float rgb_min = min(r, min(g, b));
-  float rgb_max = max(r, max(g, b));
+  float rgb_min = std::min(r, std::min(g, b));
+  float rgb_max = std::max(r, std::max(g, b));
   float rgb_delta = rgb_max - rgb_min;
 
   s = rgb_delta / (rgb_max + 1e-20f);

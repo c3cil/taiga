@@ -1,36 +1,41 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <windows/win/task_dialog.h>
+
 #include "base/base64.h"
 #include "base/file.h"
-#include "base/foreach.h"
+#include "base/format.h"
 #include "base/string.h"
-#include "library/history.h"
-#include "sync/manager.h"
+#include "media/anime_util.h"
+#include "media/library/history.h"
+#include "taiga/config.h"
 #include "taiga/resource.h"
 #include "taiga/settings.h"
 #include "taiga/stats.h"
-#include "taiga/taiga.h"
+#include "track/feed_aggregator.h"
+#include "track/feed_filter_manager.h"
 #include "track/media.h"
+#include "track/media_stream.h"
 #include "track/monitor.h"
 #include "ui/dlg/dlg_settings.h"
 #include "ui/theme.h"
-#include "win/win_taskdialog.h"
+#include "ui/translate.h"
 
 namespace ui {
 
@@ -40,7 +45,8 @@ const WCHAR* kSectionTitles[] = {
   L" Application",
   L" Recognition",
   L" Sharing",
-  L" Torrents"
+  L" Torrents",
+  L" Advanced",
 };
 
 SettingsDialog DlgSettings;
@@ -70,41 +76,43 @@ void SettingsDialog::SetCurrentSection(SettingsSections section) {
     case kSettingsSectionServices:
       tab_.InsertItem(0, L"Main", kSettingsPageServicesMain);
       tab_.InsertItem(1, L"MyAnimeList", kSettingsPageServicesMal);
-      tab_.InsertItem(2, L"Hummingbird", kSettingsPageServicesHummingbird);
+      tab_.InsertItem(2, L"Kitsu", kSettingsPageServicesKitsu);
+      tab_.InsertItem(3, L"AniList", kSettingsPageServicesAniList);
       break;
     case kSettingsSectionLibrary:
       tab_.InsertItem(0, L"Folders", kSettingsPageLibraryFolders);
-      tab_.InsertItem(1, L"Cache", kSettingsPageLibraryCache);
       break;
     case kSettingsSectionApplication:
       tab_.InsertItem(0, L"Anime list", kSettingsPageAppList);
-      tab_.InsertItem(1, L"Behavior", kSettingsPageAppBehavior);
-      tab_.InsertItem(2, L"Connection", kSettingsPageAppConnection);
-      tab_.InsertItem(3, L"Interface", kSettingsPageAppInterface);
+      tab_.InsertItem(1, L"General", kSettingsPageAppGeneral);
       break;
     case kSettingsSectionRecognition:
       tab_.InsertItem(0, L"General", kSettingsPageRecognitionGeneral);
       tab_.InsertItem(1, L"Media players", kSettingsPageRecognitionMedia);
-      tab_.InsertItem(2, L"Media providers", kSettingsPageRecognitionStream);
+      tab_.InsertItem(2, L"Streaming media", kSettingsPageRecognitionStream);
       break;
     case kSettingsSectionSharing:
-      tab_.InsertItem(0, L"HTTP", kSettingsPageSharingHttp);
-      tab_.InsertItem(1, L"mIRC", kSettingsPageSharingMirc);
-      tab_.InsertItem(2, L"Skype", kSettingsPageSharingSkype);
-      tab_.InsertItem(3, L"Twitter", kSettingsPageSharingTwitter);
+      tab_.InsertItem(0, L"Discord", kSettingsPageSharingDiscord);
+      tab_.InsertItem(1, L"HTTP", kSettingsPageSharingHttp);
+      tab_.InsertItem(2, L"mIRC", kSettingsPageSharingMirc);
       break;
     case kSettingsSectionTorrents:
       tab_.InsertItem(0, L"Discovery", kSettingsPageTorrentsDiscovery);
       tab_.InsertItem(1, L"Downloads", kSettingsPageTorrentsDownloads);
       tab_.InsertItem(2, L"Filters", kSettingsPageTorrentsFilters);
       break;
+    case kSettingsSectionAdvanced:
+      tab_.InsertItem(0, L"Settings", kSettingsPageAdvancedSettings);
+      tab_.InsertItem(1, L"Cache", kSettingsPageAdvancedCache);
+      break;
   }
 }
 
 void SettingsDialog::SetCurrentPage(SettingsPages page) {
-  pages.at(current_page_).Hide();
-
+  const auto previous_page = current_page_;
   current_page_ = page;
+
+  pages.at(previous_page).Hide();
 
   if (!IsWindow())
     return;
@@ -112,6 +120,12 @@ void SettingsDialog::SetCurrentPage(SettingsPages page) {
   if (!pages.at(current_page_).IsWindow())
     pages.at(current_page_).Create();
   pages.at(current_page_).Show();
+
+  if (previous_page != current_page_) {
+    const HWND hwnd = GetFocus();
+    if (::IsWindow(hwnd) && !::IsWindowVisible(hwnd))
+      pages.at(current_page_).SetFocus();
+  }
 
   for (int i = 0; i < tab_.GetItemCount(); i++) {
     if (tab_.GetItemParam(i) == current_page_) {
@@ -139,6 +153,7 @@ BOOL SettingsDialog::OnInitDialog() {
   TREE_INSERTITEM(kSettingsSectionRecognition, L"Recognition", ui::kIcon24_Recognition);
   TREE_INSERTITEM(kSettingsSectionSharing, L"Sharing", ui::kIcon24_Sharing);
   TREE_INSERTITEM(kSettingsSectionTorrents, L"Torrents", ui::kIcon24_Feed);
+  TREE_INSERTITEM(kSettingsSectionAdvanced, L"Advanced", ui::kIcon24_Settings);
   #undef TREE_INSERTITEM
 
   // Set title font
@@ -160,182 +175,184 @@ void SettingsDialog::OnOK() {
   win::ListView list;
   SettingsPage* page = nullptr;
 
-  std::wstring previous_service = taiga::GetCurrentService()->canonical_name();
-  std::wstring previous_user = taiga::GetCurrentUsername();
-  std::wstring previous_theme = Settings[taiga::kApp_Interface_Theme];
-
   // Services > Main
   page = &pages[kSettingsPageServicesMain];
   if (page->IsWindow()) {
     win::ComboBox combo(page->GetDlgItem(IDC_COMBO_SERVICE));
     auto service_id = static_cast<sync::ServiceId>(combo.GetItemData(combo.GetCurSel()));
-    auto service = ServiceManager.service(service_id);
-    Settings.Set(taiga::kSync_ActiveService, service->canonical_name());
-    Settings.Set(taiga::kSync_AutoOnStart, page->IsDlgButtonChecked(IDC_CHECK_START_LOGIN));
+    taiga::settings.SetSyncActiveService(service_id);
+    taiga::settings.SetSyncAutoOnStart(page->IsDlgButtonChecked(IDC_CHECK_START_LOGIN));
     combo.SetWindowHandle(nullptr);
   }
   // Services > MyAnimeList
   page = &pages[kSettingsPageServicesMal];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kSync_Service_Mal_Username, page->GetDlgItemText(IDC_EDIT_USER_MAL));
-    Settings.Set(taiga::kSync_Service_Mal_Password, Base64Encode(page->GetDlgItemText(IDC_EDIT_PASS_MAL)));
+    taiga::settings.SetSyncServiceMalUsername(page->GetDlgItemText(IDC_EDIT_USER_MAL));
   }
-  // Services > Hummingbird
-  page = &pages[kSettingsPageServicesHummingbird];
+  // Services > Kitsu
+  page = &pages[kSettingsPageServicesKitsu];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kSync_Service_Hummingbird_Username, page->GetDlgItemText(IDC_EDIT_USER_HUMMINGBIRD));
-    Settings.Set(taiga::kSync_Service_Hummingbird_Password, Base64Encode(page->GetDlgItemText(IDC_EDIT_PASS_HUMMINGBIRD)));
+    taiga::settings.SetSyncServiceKitsuEmail(page->GetDlgItemText(IDC_EDIT_USER_KITSU));
+    taiga::settings.SetSyncServiceKitsuPassword(Base64Encode(page->GetDlgItemText(IDC_EDIT_PASS_KITSU)));
+  }
+  // Services > AniList
+  page = &pages[kSettingsPageServicesAniList];
+  if (page->IsWindow()) {
+    taiga::settings.SetSyncServiceAniListUsername(page->GetDlgItemText(IDC_EDIT_USER_ANILIST));
   }
 
   // Library > Folders
   page = &pages[kSettingsPageLibraryFolders];
   if (page->IsWindow()) {
     list.SetWindowHandle(page->GetDlgItem(IDC_LIST_FOLDERS_ROOT));
-    Settings.root_folders.clear();
+    std::vector<std::wstring> library_folders;
     for (int i = 0; i < list.GetItemCount(); i++) {
       std::wstring folder;
       list.GetItemText(i, 0, folder);
-      Settings.root_folders.push_back(folder);
+      library_folders.push_back(folder);
     }
-    Settings.Set(taiga::kLibrary_WatchFolders, page->IsDlgButtonChecked(IDC_CHECK_FOLDERS_WATCH));
+    taiga::settings.SetLibraryFolders(library_folders);
+    taiga::settings.SetLibraryWatchFolders(page->IsDlgButtonChecked(IDC_CHECK_FOLDERS_WATCH));
     list.SetWindowHandle(nullptr);
   }
 
-  // Application > Behavior
-  page = &pages[kSettingsPageAppBehavior];
+  // Application > General
+  page = &pages[kSettingsPageAppGeneral];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kApp_Behavior_Autostart, page->IsDlgButtonChecked(IDC_CHECK_AUTOSTART));
-    Settings.Set(taiga::kApp_Behavior_CloseToTray, page->IsDlgButtonChecked(IDC_CHECK_GENERAL_CLOSE));
-    Settings.Set(taiga::kApp_Behavior_MinimizeToTray, page->IsDlgButtonChecked(IDC_CHECK_GENERAL_MINIMIZE));
-    Settings.Set(taiga::kApp_Behavior_CheckForUpdates, page->IsDlgButtonChecked(IDC_CHECK_START_VERSION));
-    Settings.Set(taiga::kApp_Behavior_ScanAvailableEpisodes, page->IsDlgButtonChecked(IDC_CHECK_START_CHECKEPS));
-    Settings.Set(taiga::kApp_Behavior_StartMinimized, page->IsDlgButtonChecked(IDC_CHECK_START_MINIMIZE));
-  }
-  // Application > Connection
-  page = &pages[kSettingsPageAppConnection];
-  if (page->IsWindow()) {
-    Settings.Set(taiga::kApp_Connection_ProxyHost, page->GetDlgItemText(IDC_EDIT_PROXY_HOST));
-    Settings.Set(taiga::kApp_Connection_ProxyUsername, page->GetDlgItemText(IDC_EDIT_PROXY_USER));
-    Settings.Set(taiga::kApp_Connection_ProxyPassword, page->GetDlgItemText(IDC_EDIT_PROXY_PASS));
-  }
-  // Application > Interface
-  page = &pages[kSettingsPageAppInterface];
-  if (page->IsWindow()) {
-    Settings.Set(taiga::kApp_Interface_Theme, page->GetDlgItemText(IDC_COMBO_THEME));
-    Settings.Set(taiga::kApp_Interface_ExternalLinks, page->GetDlgItemText(IDC_EDIT_EXTERNALLINKS));
+    taiga::settings.SetAppBehaviorAutostart(page->IsDlgButtonChecked(IDC_CHECK_AUTOSTART));
+    taiga::settings.SetAppBehaviorCloseToTray(page->IsDlgButtonChecked(IDC_CHECK_GENERAL_CLOSE));
+    taiga::settings.SetAppBehaviorMinimizeToTray(page->IsDlgButtonChecked(IDC_CHECK_GENERAL_MINIMIZE));
+    taiga::settings.SetAppBehaviorCheckForUpdates(page->IsDlgButtonChecked(IDC_CHECK_START_VERSION));
+    taiga::settings.SetAppBehaviorScanAvailableEpisodes(page->IsDlgButtonChecked(IDC_CHECK_START_CHECKEPS));
+    taiga::settings.SetAppBehaviorStartMinimized(page->IsDlgButtonChecked(IDC_CHECK_START_MINIMIZE));
+    taiga::settings.SetAppInterfaceExternalLinks(page->GetDlgItemText(IDC_EDIT_EXTERNALLINKS));
   }
   // Application > List
   page = &pages[kSettingsPageAppList];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kApp_List_DoubleClickAction, page->GetComboSelection(IDC_COMBO_DBLCLICK));
-    Settings.Set(taiga::kApp_List_MiddleClickAction, page->GetComboSelection(IDC_COMBO_MDLCLICK));
-    Settings.Set(taiga::kApp_List_DisplayEnglishTitles, page->IsDlgButtonChecked(IDC_CHECK_LIST_ENGLISH));
-    Settings.Set(taiga::kApp_List_HighlightNewEpisodes, page->IsDlgButtonChecked(IDC_CHECK_HIGHLIGHT));
-    Settings.Set(taiga::kApp_List_ProgressDisplayAired, page->IsDlgButtonChecked(IDC_CHECK_LIST_PROGRESS_AIRED));
-    Settings.Set(taiga::kApp_List_ProgressDisplayAvailable, page->IsDlgButtonChecked(IDC_CHECK_LIST_PROGRESS_AVAILABLE));
+    taiga::settings.SetAppListDoubleClickAction(page->GetComboSelection(IDC_COMBO_DBLCLICK));
+    taiga::settings.SetAppListMiddleClickAction(page->GetComboSelection(IDC_COMBO_MDLCLICK));
+    taiga::settings.SetAppListTitleLanguagePreference(static_cast<anime::TitleLanguage>(
+        page->GetComboSelection(IDC_COMBO_TITLELANG)));
+    taiga::settings.SetAppListHighlightNewEpisodes(page->IsDlgButtonChecked(IDC_CHECK_HIGHLIGHT));
+    taiga::settings.SetAppListDisplayHighlightedOnTop(page->IsDlgButtonChecked(IDC_CHECK_HIGHLIGHT_ONTOP));
+    taiga::settings.SetAppListProgressDisplayAired(page->IsDlgButtonChecked(IDC_CHECK_LIST_PROGRESS_AIRED));
+    taiga::settings.SetAppListProgressDisplayAvailable(page->IsDlgButtonChecked(IDC_CHECK_LIST_PROGRESS_AVAILABLE));
   }
 
   // Recognition > General
   page = &pages[kSettingsPageRecognitionGeneral];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kSync_Update_AskToConfirm, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_CONFIRM));
-    Settings.Set(taiga::kSync_Update_CheckPlayer, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_CHECKMP));
-    Settings.Set(taiga::kSync_Update_GoToNowPlaying, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_GOTO));
-    Settings.Set(taiga::kSync_Update_OutOfRange, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_RANGE));
-    Settings.Set(taiga::kSync_Update_OutOfRoot, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_ROOT));
-    Settings.Set(taiga::kSync_Update_WaitPlayer, page->IsDlgButtonChecked(IDC_CHECK_UPDATE_WAITMP));
-    Settings.Set(taiga::kSync_Update_Delay, static_cast<int>(page->GetDlgItemInt(IDC_EDIT_DELAY)));
-    Settings.Set(taiga::kSync_Notify_Recognized, page->IsDlgButtonChecked(IDC_CHECK_NOTIFY_RECOGNIZED));
-    Settings.Set(taiga::kSync_Notify_NotRecognized, page->IsDlgButtonChecked(IDC_CHECK_NOTIFY_NOTRECOGNIZED));
+    taiga::settings.SetSyncUpdateAskToConfirm(page->IsDlgButtonChecked(IDC_CHECK_UPDATE_CONFIRM));
+    taiga::settings.SetSyncUpdateCheckPlayer(page->IsDlgButtonChecked(IDC_CHECK_UPDATE_CHECKMP));
+    taiga::settings.SetSyncUpdateOutOfRange(page->IsDlgButtonChecked(IDC_CHECK_UPDATE_RANGE));
+    taiga::settings.SetSyncUpdateOutOfRoot(page->IsDlgButtonChecked(IDC_CHECK_UPDATE_ROOT));
+    taiga::settings.SetSyncUpdateWaitPlayer(page->IsDlgButtonChecked(IDC_CHECK_UPDATE_WAITMP));
+    taiga::settings.SetSyncUpdateDelay(static_cast<int>(page->GetDlgItemInt(IDC_EDIT_DELAY)));
+    taiga::settings.SetSyncGoToNowPlayingRecognized(page->IsDlgButtonChecked(IDC_CHECK_GOTO_RECOGNIZED));
+    taiga::settings.SetSyncGoToNowPlayingNotRecognized(page->IsDlgButtonChecked(IDC_CHECK_GOTO_NOTRECOGNIZED));
+    taiga::settings.SetSyncNotifyRecognized(page->IsDlgButtonChecked(IDC_CHECK_NOTIFY_RECOGNIZED));
+    taiga::settings.SetSyncNotifyNotRecognized(page->IsDlgButtonChecked(IDC_CHECK_NOTIFY_NOTRECOGNIZED));
   }
   // Recognition > Media players
   page = &pages[kSettingsPageRecognitionMedia];
   if (page->IsWindow()) {
+    taiga::settings.SetRecognitionDetectMediaPlayers(page->IsDlgButtonChecked(IDC_CHECK_DETECT_MEDIA_PLAYER) == TRUE);
     list.SetWindowHandle(page->GetDlgItem(IDC_LIST_MEDIA));
-    for (size_t i = 0; i < MediaPlayers.items.size(); i++)
-      MediaPlayers.items[i].enabled = list.GetCheckState(i);
+    for (int i = 0; i < list.GetItemCount(); ++i) {
+      const auto& player = track::media_players.items[list.GetItemParam(i)];
+      taiga::settings.SetMediaPlayerEnabled(StrToWstr(player.name), list.GetCheckState(i));
+    }
     list.SetWindowHandle(nullptr);
   }
   // Recognition > Media providers
   page = &pages[kSettingsPageRecognitionStream];
   if (page->IsWindow()) {
+    taiga::settings.SetRecognitionDetectStreamingMedia(page->IsDlgButtonChecked(IDC_CHECK_DETECT_STREAMING_MEDIA) == TRUE);
     list.SetWindowHandle(page->GetDlgItem(IDC_LIST_STREAM_PROVIDER));
-    Settings.Set(taiga::kStream_Animelab, list.GetCheckState(0) == TRUE);
-    Settings.Set(taiga::kStream_Ann, list.GetCheckState(1) == TRUE);
-    Settings.Set(taiga::kStream_Crunchyroll, list.GetCheckState(2) == TRUE);
-    Settings.Set(taiga::kStream_Daisuki, list.GetCheckState(3) == TRUE);
-    Settings.Set(taiga::kStream_Veoh, list.GetCheckState(4) == TRUE);
-    Settings.Set(taiga::kStream_Viz, list.GetCheckState(5) == TRUE);
-    Settings.Set(taiga::kStream_Youtube, list.GetCheckState(6) == TRUE);
+    for (int i = 0; i < list.GetItemCount(); ++i) {
+      track::recognition::EnableStream(static_cast<track::recognition::Stream>(list.GetItemParam(i)), list.GetCheckState(i) == TRUE);
+    }
     list.SetWindowHandle(nullptr);
   }
 
+  // Sharing > Discord
+  page = &pages[kSettingsPageSharingDiscord];
+  if (page->IsWindow()) {
+    taiga::settings.SetShareDiscordEnabled(page->IsDlgButtonChecked(IDC_CHECK_DISCORD));
+    taiga::settings.SetShareDiscordUsernameEnabled(page->IsDlgButtonChecked(IDC_CHECK_DISCORD_USERNAME));
+    taiga::settings.SetShareDiscordGroupEnabled(page->IsDlgButtonChecked(IDC_CHECK_DISCORD_GROUP));
+    taiga::settings.SetShareDiscordTimeEnabled(page->IsDlgButtonChecked(IDC_CHECK_DISCORD_TIME));
+  }
   // Sharing > HTTP
   page = &pages[kSettingsPageSharingHttp];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kShare_Http_Enabled, page->IsDlgButtonChecked(IDC_CHECK_HTTP));
-    Settings.Set(taiga::kShare_Http_Url, page->GetDlgItemText(IDC_EDIT_HTTP_URL));
+    taiga::settings.SetShareHttpEnabled(page->IsDlgButtonChecked(IDC_CHECK_HTTP));
+    taiga::settings.SetShareHttpUrl(page->GetDlgItemText(IDC_EDIT_HTTP_URL));
   }
   // Sharing > mIRC
   page = &pages[kSettingsPageSharingMirc];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kShare_Mirc_Enabled, page->IsDlgButtonChecked(IDC_CHECK_MIRC));
-    Settings.Set(taiga::kShare_Mirc_Service, page->GetDlgItemText(IDC_EDIT_MIRC_SERVICE));
-    Settings.Set(taiga::kShare_Mirc_Mode, page->GetCheckedRadioButton(IDC_RADIO_MIRC_CHANNEL1, IDC_RADIO_MIRC_CHANNEL3) + 1);
-    Settings.Set(taiga::kShare_Mirc_MultiServer, page->IsDlgButtonChecked(IDC_CHECK_MIRC_MULTISERVER));
-    Settings.Set(taiga::kShare_Mirc_UseMeAction, page->IsDlgButtonChecked(IDC_CHECK_MIRC_ACTION));
-    Settings.Set(taiga::kShare_Mirc_Channels, page->GetDlgItemText(IDC_EDIT_MIRC_CHANNELS));
-  }
-  // Sharing > Skype
-  page = &pages[kSettingsPageSharingSkype];
-  if (page->IsWindow()) {
-    Settings.Set(taiga::kShare_Skype_Enabled, page->IsDlgButtonChecked(IDC_CHECK_SKYPE));
-  }
-  // Sharing > Twitter
-  page = &pages[kSettingsPageSharingTwitter];
-  if (page->IsWindow()) {
-    Settings.Set(taiga::kShare_Twitter_Enabled, page->IsDlgButtonChecked(IDC_CHECK_TWITTER));
+    taiga::settings.SetShareMircEnabled(page->IsDlgButtonChecked(IDC_CHECK_MIRC));
+    taiga::settings.SetShareMircService(page->GetDlgItemText(IDC_EDIT_MIRC_SERVICE));
+    taiga::settings.SetShareMircMode(page->GetCheckedRadioButton(IDC_RADIO_MIRC_CHANNEL1, IDC_RADIO_MIRC_CHANNEL3) + 1);
+    taiga::settings.SetShareMircMultiServer(page->IsDlgButtonChecked(IDC_CHECK_MIRC_MULTISERVER));
+    taiga::settings.SetShareMircUseMeAction(page->IsDlgButtonChecked(IDC_CHECK_MIRC_ACTION));
+    taiga::settings.SetShareMircChannels(page->GetDlgItemText(IDC_EDIT_MIRC_CHANNELS));
   }
 
   // Torrents > Discovery
   page = &pages[kSettingsPageTorrentsDiscovery];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kTorrent_Discovery_Source, page->GetDlgItemText(IDC_COMBO_TORRENT_SOURCE));
-    Settings.Set(taiga::kTorrent_Discovery_SearchUrl, page->GetDlgItemText(IDC_COMBO_TORRENT_SEARCH));
-    Settings.Set(taiga::kTorrent_Discovery_AutoCheckEnabled, page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOCHECK));
-    Settings.Set(taiga::kTorrent_Discovery_AutoCheckInterval, static_cast<int>(page->GetDlgItemInt(IDC_EDIT_TORRENT_INTERVAL)));
-    Settings.Set(taiga::kTorrent_Discovery_NewAction, page->GetCheckedRadioButton(IDC_RADIO_TORRENT_NEW1, IDC_RADIO_TORRENT_NEW2) + 1);
+    taiga::settings.SetTorrentDiscoverySource(page->GetDlgItemText(IDC_COMBO_TORRENT_SOURCE));
+    taiga::settings.SetTorrentDiscoverySearchUrl(page->GetDlgItemText(IDC_COMBO_TORRENT_SEARCH));
+    taiga::settings.SetTorrentDiscoveryAutoCheckEnabled(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOCHECK));
+    taiga::settings.SetTorrentDiscoveryAutoCheckInterval(static_cast<int>(page->GetDlgItemInt(IDC_EDIT_TORRENT_INTERVAL)));
+    taiga::settings.SetTorrentDiscoveryNewAction(static_cast<track::TorrentAction>(
+        page->GetCheckedRadioButton(IDC_RADIO_TORRENT_NEW1, IDC_RADIO_TORRENT_NEW2) + 1));
   }
   // Torrents > Downloads
   page = &pages[kSettingsPageTorrentsDownloads];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kTorrent_Download_AppMode, page->GetCheckedRadioButton(IDC_RADIO_TORRENT_APP1, IDC_RADIO_TORRENT_APP2) + 1);
-    Settings.Set(taiga::kTorrent_Download_AppPath, page->GetDlgItemText(IDC_EDIT_TORRENT_APP));
-    Settings.Set(taiga::kTorrent_Download_UseAnimeFolder, page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOSETFOLDER));
-    Settings.Set(taiga::kTorrent_Download_FallbackOnFolder, page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOUSEFOLDER));
-    Settings.Set(taiga::kTorrent_Download_Location, page->GetDlgItemText(IDC_COMBO_TORRENT_FOLDER));
-    Settings.Set(taiga::kTorrent_Download_CreateSubfolder, page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOCREATEFOLDER));
+    taiga::settings.SetTorrentDownloadSortBy(
+        page->GetComboSelection(IDC_COMBO_TORRENTS_QUEUE_SORTBY) == 0 ?
+        std::wstring(L"episode_number") : std::wstring(L"release_date"));
+    taiga::settings.SetTorrentDownloadSortOrder(
+        page->GetComboSelection(IDC_COMBO_TORRENTS_QUEUE_SORTORDER) == 0 ?
+        std::wstring(L"ascending") : std::wstring(L"descending"));
+    taiga::settings.SetTorrentDownloadUseAnimeFolder(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOSETFOLDER));
+    taiga::settings.SetTorrentDownloadFallbackOnFolder(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOUSEFOLDER));
+    taiga::settings.SetTorrentDownloadLocation(page->GetDlgItemText(IDC_COMBO_TORRENT_FOLDER));
+    taiga::settings.SetTorrentDownloadCreateSubfolder(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_AUTOCREATEFOLDER));
+    taiga::settings.SetTorrentDownloadAppOpen(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_APP_OPEN));
+    taiga::settings.SetTorrentDownloadAppMode(static_cast<track::TorrentApp>(
+        page->GetCheckedRadioButton(IDC_RADIO_TORRENT_APP1, IDC_RADIO_TORRENT_APP2) + 1));
+    taiga::settings.SetTorrentDownloadAppPath(page->GetDlgItemText(IDC_EDIT_TORRENT_APP));
   }
   // Torrents > Filters
   page = &pages[kSettingsPageTorrentsFilters];
   if (page->IsWindow()) {
-    Settings.Set(taiga::kTorrent_Filter_Enabled, page->IsDlgButtonChecked(IDC_CHECK_TORRENT_FILTER));
+    taiga::settings.SetTorrentFilterEnabled(page->IsDlgButtonChecked(IDC_CHECK_TORRENT_FILTER));
     list.SetWindowHandle(page->GetDlgItem(IDC_LIST_TORRENT_FILTER));
     for (int i = 0; i < list.GetItemCount(); i++) {
-      FeedFilter* filter = reinterpret_cast<FeedFilter*>(list.GetItemParam(i));
+      const auto filter = reinterpret_cast<track::FeedFilter*>(list.GetItemParam(i));
       if (filter) filter->enabled = list.GetCheckState(i) == TRUE;
     }
     list.SetWindowHandle(nullptr);
-    Aggregator.filter_manager.filters.clear();
-    for (auto it = feed_filters_.begin(); it != feed_filters_.end(); ++it)
-      Aggregator.filter_manager.filters.push_back(*it);
+    track::feed_filter_manager.SetFilters(feed_filters_);
+  }
+
+  // Advanced
+  page = &pages[kSettingsPageAdvancedSettings];
+  if (page->IsWindow()) {
+    for (const auto& [key, value] : advanced_settings_) {
+      SetAdvancedSetting(key, value);
+    }
   }
 
   // Save settings
-  Settings.Save();
-
-  // Apply changes
-  Settings.ApplyChanges(previous_service, previous_user, previous_theme);
+  taiga::settings.Save();
+  taiga::settings.ApplyChanges();
 
   // End dialog
   EndDialog(IDOK);
@@ -351,16 +368,10 @@ INT_PTR SettingsDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
       HWND hwnd_static = reinterpret_cast<HWND>(lParam);
       if (hwnd_static == GetDlgItem(IDC_STATIC_TITLE)) {
         ::SetBkMode(hdc, TRANSPARENT);
-        ::SetTextColor(hdc, ::GetSysColor(COLOR_WINDOW));
+        ::SetTextColor(hdc, ::GetSysColor(COLOR_HIGHLIGHTTEXT));
         return reinterpret_cast<INT_PTR>(::GetSysColorBrush(COLOR_APPWORKSPACE));
       }
       break;
-    }
-
-    // Taiga, help! Only you can save us!
-    case WM_HELP: {
-      OnHelp(reinterpret_cast<LPHELPINFO>(lParam));
-      return TRUE;
     }
 
     // Forward mouse wheel messages to the list
@@ -380,38 +391,6 @@ INT_PTR SettingsDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
   }
 
   return DialogProcDefault(hwnd, uMsg, wParam, lParam);
-}
-
-void SettingsDialog::OnHelp(LPHELPINFO lphi) {
-  std::wstring message, text;
-  pages.at(current_page_).GetDlgItemText(lphi->iCtrlId, text);
-
-  #define SET_HELP_TEXT(i, m) \
-    case i: message = m; break;
-  switch (lphi->iCtrlId) {
-    // Library > Folders
-    SET_HELP_TEXT(IDC_LIST_FOLDERS_ROOT,
-        L"These folders will be scanned and monitored for new episodes.\n\n"
-        L"Suppose that you have an HDD like this:\n\n"
-        L"    D:\\\n"
-        L"    \u2514 Anime\n"
-        L"        \u2514 Bleach\n"
-        L"        \u2514 Naruto\n"
-        L"        \u2514 One Piece\n"
-        L"    \u2514 Games\n"
-        L"    \u2514 Music\n\n"
-        L"In this case, \"D:\\Anime\" is the root folder you should add.");
-    SET_HELP_TEXT(IDC_CHECK_FOLDERS_WATCH,
-        L"With this feature on, Taiga instantly detects when a file is added, removed, or renamed under root folders and their subfolders.\n\n"
-        L"Enabling this feature is recommended.");
-    // Not available
-    default:
-      message = L"There's no help message associated with this item.";
-      break;
-  }
-  #undef SET_HELP_TEXT
-
-  MessageBox(message.c_str(), L"Help", MB_ICONINFORMATION | MB_OK);
 }
 
 LRESULT SettingsDialog::OnNotify(int idCtrl, LPNMHDR pnmh) {
@@ -444,26 +423,6 @@ LRESULT SettingsDialog::OnNotify(int idCtrl, LPNMHDR pnmh) {
       }
       break;
     }
-
-    case IDC_LINK_DEFAULTS: {
-      switch (pnmh->code) {
-        // Restore default settings
-        case NM_CLICK: {
-          win::TaskDialog dlg;
-          dlg.SetWindowTitle(TAIGA_APP_NAME);
-          dlg.SetMainIcon(TD_ICON_WARNING);
-          dlg.SetMainInstruction(L"Are you sure you want to restore default settings?");
-          dlg.SetContent(L"All your current settings will be lost.");
-          dlg.AddButton(L"Yes", IDYES);
-          dlg.AddButton(L"No", IDNO);
-          dlg.Show(GetWindowHandle());
-          if (dlg.GetSelectedButtonID() == IDYES)
-            Settings.RestoreDefaults();
-          return TRUE;
-        }
-      }
-      break;
-    }
   }
 
   return 0;
@@ -481,21 +440,27 @@ LRESULT SettingsDialog::TreeView::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int SettingsDialog::AddTorrentFilterToList(HWND hwnd_list, const FeedFilter& filter) {
+int SettingsDialog::AddTorrentFilterToList(HWND hwnd_list, const track::FeedFilter& filter) {
   win::ListView list = hwnd_list;
-  int index = list.GetItemCount();
-  int group = filter.anime_ids.empty() ? 0 : 1;
 
-  int icon = ui::kIcon16_Funnel;
-  switch (filter.action) {
-    case kFeedFilterActionDiscard: icon = ui::kIcon16_FunnelCross; break;
-    case kFeedFilterActionSelect:  icon = ui::kIcon16_FunnelTick;  break;
-    case kFeedFilterActionPrefer:  icon = ui::kIcon16_FunnelPlus;  break;
-  }
+  const int index = list.GetItemCount();
 
-  // Insert item
-  index = list.InsertItem(index, group, icon, 0, nullptr, filter.name.c_str(),
-                          reinterpret_cast<LPARAM>(&filter));
+  const int icon = [&filter]() {
+    switch (filter.action) {
+      default: return ui::kIcon16_Funnel;
+      case track::kFeedFilterActionDiscard: return ui::kIcon16_FunnelCross;
+      case track::kFeedFilterActionSelect: return ui::kIcon16_FunnelTick;
+      case track::kFeedFilterActionPrefer: return ui::kIcon16_FunnelPlus;
+    }
+  }();
+
+  const std::wstring limits = filter.anime_ids.empty()
+      ? L"All"
+      : L"{} anime"_format(filter.anime_ids.size());
+
+  list.InsertItem(index, -1, icon, 0, nullptr, filter.name.c_str(),
+                  reinterpret_cast<LPARAM>(&filter));
+  list.SetItem(index, 1, limits.c_str());
   list.SetCheckState(index, filter.enabled);
   list.SetWindowHandle(nullptr);
 
@@ -504,45 +469,52 @@ int SettingsDialog::AddTorrentFilterToList(HWND hwnd_list, const FeedFilter& fil
 
 void SettingsDialog::RefreshCache() {
   std::wstring text;
-  Stats.CalculateLocalData();
-  SettingsPage& page = pages[kSettingsPageLibraryCache];
+  taiga::stats.CalculateLocalData();
+  SettingsPage& page = pages[kSettingsPageAdvancedCache];
+
+  page.SetRedraw(FALSE);
 
   // History
-  text = ToWstr(static_cast<int>(History.items.size())) + L" item(s)";
+  text = ToWstr(library::history.items.size()) + L" item(s)";
   page.SetDlgItemText(IDC_STATIC_CACHE1, text.c_str());
 
   // Image files
-  text = ToWstr(Stats.image_count) + L" item(s), " + ToSizeString(Stats.image_size);
+  text = ToWstr(taiga::stats.image_count) + L" item(s), " + ToSizeString(taiga::stats.image_size);
   page.SetDlgItemText(IDC_STATIC_CACHE2, text.c_str());
 
   // Torrent files
-  text = ToWstr(Stats.torrent_count) + L" item(s), " + ToSizeString(Stats.torrent_size);
+  text = ToWstr(taiga::stats.torrent_count) + L" item(s), " + ToSizeString(taiga::stats.torrent_size);
   page.SetDlgItemText(IDC_STATIC_CACHE3, text.c_str());
+
+  // Torrent history
+  text = ToWstr(track::aggregator.archive.Size()) + L" item(s)";
+  page.SetDlgItemText(IDC_STATIC_CACHE4, text.c_str());
+
+  page.SetRedraw(TRUE);
+  page.RedrawWindow(nullptr, nullptr,
+                    RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void SettingsDialog::RefreshTorrentFilterList(HWND hwnd_list) {
   win::ListView list = hwnd_list;
   list.DeleteAllItems();
 
-  for (auto it = feed_filters_.begin(); it != feed_filters_.end(); ++it)
-    AddTorrentFilterToList(hwnd_list, *it);
+  for (const auto& feed_filter : feed_filters_) {
+    AddTorrentFilterToList(hwnd_list, feed_filter);
+  }
 
-  list.SetColumnWidth(0, LVSCW_AUTOSIZE_USEHEADER);
   list.SetWindowHandle(nullptr);
 }
 
-void SettingsDialog::RefreshTwitterLink() {
-  std::wstring text;
+void SettingsDialog::UpdateTorrentFilterList(HWND hwnd_list) {
+  win::ListView list = hwnd_list;
 
-  if (Settings[taiga::kShare_Twitter_Username].empty()) {
-    text = L"Taiga is not authorized to post to your Twitter account yet.";
-  } else {
-    text = L"Taiga is authorized to post to this Twitter account: ";
-    text += L"<a href=\"URL(http://twitter.com/" + Settings[taiga::kShare_Twitter_Username];
-    text += L")\">" + Settings[taiga::kShare_Twitter_Username] + L"</a>";
+  for (size_t i = 0; i < feed_filters_.size(); ++i) {
+    const auto& feed_filter = feed_filters_.at(i);
+    list.SetItemParam(i, reinterpret_cast<LPARAM>(&feed_filter));
   }
 
-  pages[kSettingsPageSharingTwitter].SetDlgItemText(IDC_LINK_TWITTER, text.c_str());
+  list.SetWindowHandle(nullptr);
 }
 
 }  // namespace ui

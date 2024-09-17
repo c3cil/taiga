@@ -1,29 +1,29 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef TAIGA_UI_THEME_H
-#define TAIGA_UI_THEME_H
+#pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
-#include "win/ctrl/win_ctrl.h"
-#include "win/win_gdi.h"
+#include <windows/win/common_controls.h>
+#include <windows/win/gdi.h>
 
 namespace ui {
 
@@ -51,6 +51,8 @@ enum Icons16px {
   kIcon16_FunnelPlus,
   kIcon16_FunnelPencil,
   kIcon16_Calendar,
+  kIcon16_CalendarPrev,
+  kIcon16_CalendarNext,
   kIcon16_Category,
   kIcon16_Sort,
   kIcon16_Balloon,
@@ -91,16 +93,16 @@ enum ListProgressType {
   kListProgressOnHold,
   kListProgressPlanToWatch,
   kListProgressSeparator,
-  kListProgressWatching
+  kListProgressWatching,
 };
 
-const COLORREF kColorDarkBlue = RGB(46, 81, 162);
-const COLORREF kColorGray = RGB(230, 230, 230);
-const COLORREF kColorLightBlue = RGB(225, 231, 245);
-const COLORREF kColorLightGray = RGB(248, 248, 248);
-const COLORREF kColorLightGreen = RGB(225, 245, 231);
-const COLORREF kColorLightRed = RGB(245, 225, 231);
-const COLORREF kColorMainInstruction = RGB(0x00, 0x33, 0x99);
+constexpr COLORREF kColorDarkBlue = RGB(46, 81, 162);
+constexpr COLORREF kColorGray = RGB(230, 230, 230);
+constexpr COLORREF kColorLightBlue = RGB(225, 231, 245);
+constexpr COLORREF kColorLightGray = RGB(248, 248, 248);
+constexpr COLORREF kColorLightGreen = RGB(225, 245, 231);
+constexpr COLORREF kColorLightRed = RGB(245, 225, 231);
+constexpr COLORREF kColorMainInstruction = RGB(0x00, 0x33, 0x99);
 
 class ThemeManager {
 public:
@@ -137,8 +139,6 @@ private:
   std::map<ListProgressType, Progress> list_progress_;
 };
 
-extern ThemeManager Theme;
+inline ThemeManager Theme;
 
 }  // namespace ui
-
-#endif  // TAIGA_UI_THEME_H

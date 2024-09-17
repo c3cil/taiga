@@ -1,33 +1,98 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <cmath>
+#include <curl/curlver.h>
+#include <fmt/format.h>
+#include <nlohmann/json.hpp>
+#include <pugixml.hpp>
+#include <rapidjson/rapidjson.h>
+#include <utf8proc/utf8proc.h>
+#include <zlib/zlib.h>
 
 #include "base/file.h"
 #include "base/gfx.h"
 #include "base/string.h"
+#include "taiga/config.h"
 #include "taiga/orange.h"
 #include "taiga/resource.h"
 #include "taiga/stats.h"
-#include "taiga/taiga.h"
+#include "taiga/version.h"
 #include "ui/dlg/dlg_about.h"
 
 namespace ui {
+
+enum ThirdPartyLibrary {
+  kDate,
+  kDiscordRpc,
+  kFmt,
+  kJson,
+  kLibcurl,
+  kPugixml,
+  kRandom,
+  kRapidJson,
+  kUtf8proc,
+  kZlib,
+};
+
+static std::wstring GetLibraryVersion(ThirdPartyLibrary library) {
+  switch (library) {
+    case kDate:
+      return L"3.0.1";
+    case kDiscordRpc:
+      return L"3.4.0";
+    case kFmt:
+      return StrToWstr(semaver::Version(
+          (FMT_VERSION / 10000),
+          (FMT_VERSION % 10000) / 100,
+          (FMT_VERSION % 10000) % 100).to_string());
+    case kJson:
+      return StrToWstr(semaver::Version(
+          NLOHMANN_JSON_VERSION_MAJOR,
+          NLOHMANN_JSON_VERSION_MINOR,
+          NLOHMANN_JSON_VERSION_PATCH).to_string());
+    case kLibcurl:
+      return StrToWstr(semaver::Version(
+          LIBCURL_VERSION_MAJOR,
+          LIBCURL_VERSION_MINOR,
+          LIBCURL_VERSION_PATCH).to_string());
+    case kPugixml:
+      return StrToWstr(semaver::Version(
+          (PUGIXML_VERSION / 1000),
+          (PUGIXML_VERSION % 1000) / 10,
+          (PUGIXML_VERSION % 1000) % 10).to_string());
+    case kRandom:
+      return L"1.4.0";
+    case kRapidJson:
+      return StrToWstr(semaver::Version(
+          RAPIDJSON_MAJOR_VERSION,
+          RAPIDJSON_MINOR_VERSION,
+          RAPIDJSON_PATCH_VERSION).to_string());
+    case kUtf8proc:
+      return StrToWstr(utf8proc_version());
+    case kZlib:
+      return StrToWstr(ZLIB_VERSION);
+      break;
+  }
+
+  return std::wstring();
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 class AboutDialog DlgAbout;
 
@@ -43,47 +108,57 @@ BOOL AboutDialog::OnDestroy() {
 
 BOOL AboutDialog::OnInitDialog() {
   rich_edit_.Attach(GetDlgItem(IDC_RICHEDIT_ABOUT));
-  rich_edit_.SendMessage(EM_AUTOURLDETECT, TRUE /* AURL_ENABLEURL */);
+  auto schemes = L"http:https:irc:";
+  rich_edit_.SendMessage(EM_AUTOURLDETECT, TRUE /*= AURL_ENABLEURL*/,
+                         reinterpret_cast<LPARAM>(schemes));
   rich_edit_.SetEventMask(ENM_LINK);
 
   std::wstring text =
-      L"{\\rtf1\\ansi\\deff0"
+      L"{\\rtf1\\ansi\\deff0\\deflang1024"
       L"{\\fonttbl"
-      L"{\\f0 Segoe UI;}"
+      L"{\\f0\\fnil\\fcharset0 Segoe UI;}"
       L"}"
-      L"\\deflang1024\\fs18"
-      L"\\b " TAIGA_APP_NAME L"\\b0\\line "
-      L"version " + std::wstring(Taiga.version) + L"\\line\\line "
+      L"\\fs24\\b " TAIGA_APP_NAME L"\\b0  " + StrToWstr(taiga::version().to_string()) + L"\\line\\fs18\\par "
       L"\\b Author:\\b0\\line "
-      L"Eren 'erengy' Okka\\line\\line "
-      L"\\b Committers and other contributors:\\b0\\line "
-      L"saka, Diablofan, slevir, LordGravewish, cassist, rr-\\line\\line "
-      L"\\b Third party stuff that is used by Taiga:\\b0\\line "
-      L"- Fugue Icons 3.4.5, Copyright (c) 2012, Yusuke Kamiyamane\\line "
-      L"- JsonCpp 0.6.0, Copyright (c) 2007-2010, Baptiste Lepilleur\\line "
-      L"- libcurl 7.38.0, Copyright (c) 1996-2014, Daniel Stenberg\\line "
-      L"- pugixml 1.4, Copyright (c) 2006-2014, Arseny Kapoulkine\\line "
-      L"- zlib 1.2.8, Copyright (c) 1995-2013, Jean-loup Gailly and Mark Adler\\line\\line "
+      L"erengy (Eren Okka)\\line\\par "
+      L"\\b Contributors:\\b0\\line "
+      L"saka, Diablofan, slevir, LordGravewish, rr-, sunjayc, ConnorKrammer, Soinou, Jiyuu, ryban, tollyx,\\line "
+      L"pavelxdd, gunt3001, synthtech, cnguy, CeruleanSky, Xabis, rzumer, Juplay, SacredZenpie\\line\\par "
+      L"\\b Donators:\\b0\\line "
+      L"Farfie, snickler, Nydaleclya, WizardTim, Kinzer, MeGaNeKo, WhatsCPS, Jerico64 and other anonymous supporters\\line\\par "
+      L"\\b Third-party components:\\b0\\line "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/HowardHinnant/date\"}}{\\fldrslt{date " + GetLibraryVersion(kDate) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/discordapp/discord-rpc\"}}{\\fldrslt{Discord RPC " + GetLibraryVersion(kDiscordRpc) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/fmtlib/fmt\"}}{\\fldrslt{fmt " + GetLibraryVersion(kFmt) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://p.yusukekamiyamane.com/icons/search/fugue/\"}}{\\fldrslt{Fugue Icons 3.4.5}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/nlohmann/json\"}}{\\fldrslt{JSON for Modern C++ " + GetLibraryVersion(kJson) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/curl/curl\"}}{\\fldrslt{libcurl " + GetLibraryVersion(kLibcurl) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/zeux/pugixml\"}}{\\fldrslt{pugixml " + GetLibraryVersion(kPugixml) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/effolkronium/random\"}}{\\fldrslt{Random " + GetLibraryVersion(kRandom) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/Tencent/rapidjson\"}}{\\fldrslt{RapidJSON " + GetLibraryVersion(kRapidJson) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/JuliaLang/utf8proc\"}}{\\fldrslt{utf8proc " + GetLibraryVersion(kUtf8proc) + L"}}}, "
+      L"{\\field{\\*\\fldinst{HYPERLINK \"https://github.com/madler/zlib\"}}{\\fldrslt{zlib " + GetLibraryVersion(kZlib) + L"}}}\\line\\par "
       L"\\b Links:\\b0\\line "
-      L"- Home page {\\field{\\*\\fldinst HYPERLINK \"http://taiga.erengy.com\"}{\\fldrslt http://taiga.erengy.com}}\\line "
-      L"- GitHub repository {\\field{\\*\\fldinst HYPERLINK \"https://github.com/erengy/taiga\"}{\\fldrslt https://github.com/erengy/taiga}}\\line "
-      L"- Hummingbird thread {\\field{\\*\\fldinst HYPERLINK \"http://forums.hummingbird.me/t/taiga/10565\"}{\\fldrslt http://forums.hummingbird.me/t/taiga/10565}}\\line "
-      L"- MyAnimeList club {\\field{\\*\\fldinst HYPERLINK \"http://myanimelist.net/clubs.php?cid=21400\"}{\\fldrslt http://myanimelist.net/clubs.php?cid=21400}}\\line "
-      L"- Twitter account {\\field{\\*\\fldinst HYPERLINK \"https://twitter.com/taigaapp\"}{\\fldrslt https://twitter.com/taigaapp}}\\line "
-      L"- IRC channel {\\field{\\*\\fldinst HYPERLINK \"irc://irc.rizon.net/taiga\"}{\\fldrslt irc://irc.rizon.net/taiga}}"
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://taiga.moe\"}}{\\fldrslt{Home page}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://github.com/erengy/taiga\"}}{\\fldrslt{GitHub repository}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://myanimelist.net/clubs.php?cid=21400\"}}{\\fldrslt{MyAnimeList club}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://kitsu.io/groups/taiga\"}}{\\fldrslt{Kitsu group}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://anilist.co/forum/thread/2846/1\"}}{\\fldrslt{AniList thread}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://discord.gg/yeGNktZ\"}}{\\fldrslt{Discord server}}}\\line "
+      L"\u2022 {\\field{\\*\\fldinst{HYPERLINK \"https://twitter.com/taigaapp\"}}{\\fldrslt{Twitter account}}}"
       L"}";
   rich_edit_.SetTextEx(WstrToStr(text));
 
   return TRUE;
 }
 
-BOOL AboutDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR AboutDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
     case WM_COMMAND: {
       // Icon click
       if (HIWORD(wParam) == STN_DBLCLK) {
         SetText(L"Orange");
-        Stats.tigers_harmed++;
+        taiga::stats.tigers_harmed++;
         taiga::orange.Start();
         return TRUE;
       }
@@ -113,10 +188,24 @@ void AboutDialog::OnPaint(HDC hdc, LPPAINTSTRUCT lpps) {
   win::Dc dc = hdc;
   win::Rect rect;
 
+  win::Rect rect_edit;
+  rich_edit_.GetWindowRect(GetWindowHandle(), &rect_edit);
+
+  const int margin = rect_edit.top;
+  const int sidebar_width = rect_edit.left - margin;
+
   // Paint background
   GetClientRect(&rect);
-  rect.left = ScaleX(static_cast<int>(48 * 1.5f));
+  rect.left = sidebar_width;
   dc.FillRect(rect, ::GetSysColor(COLOR_WINDOW));
+
+  // Paint application icon
+  rect.Set(margin / 2, margin, sidebar_width - (margin / 2), rect.bottom);
+  DrawIconResource(IDI_MAIN, dc.Get(), rect, true, false);
+  win::Window label = GetDlgItem(IDC_STATIC_APP_ICON);
+  label.SetPosition(nullptr, rect,
+      SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOOWNERZORDER | SWP_NOZORDER);
+  label.SetWindowHandle(nullptr);
 }
 
 }  // namespace ui

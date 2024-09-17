@@ -1,50 +1,77 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef TAIGA_SYNC_SYNC_H
-#define TAIGA_SYNC_SYNC_H
+#pragma once
 
-#include "service.h"
-#include "base/types.h"
-#include "library/history.h"
-#include "taiga/http.h"
+#include <string>
+
+namespace anime {
+class Season;
+}
+namespace hypr::detail {
+struct Transfer;
+}
+namespace library {
+struct QueueItem;
+}
+namespace taiga::http {
+using Transfer = hypr::detail::Transfer;
+}
 
 namespace sync {
 
-void AuthenticateUser(bool download);
+enum class RequestType {
+  RequestAccessToken,
+  RefreshAccessToken,
+  AuthenticateUser,
+  GetUser,
+  GetLibraryEntries,
+  GetMetadataById,
+  GetSeason,
+  SearchTitle,
+  AddLibraryEntry,
+  DeleteLibraryEntry,
+  UpdateLibraryEntry,
+};
+
+void AuthenticateUser();
+void GetUser();
 void GetLibraryEntries();
-void GetMetadataById(int id);
-void GetMetadataByIdV2(int id);
-void SearchTitle(string_t title, int id);
+void GetMetadataById(const int id);
+void GetSeason(const anime::Season season);
+void SearchTitle(const std::wstring& title);
 void Synchronize();
-void UpdateLibraryEntry(AnimeValues& anime_values, int id,
-                        taiga::HttpClientMode http_client_mode);
+void AddLibraryEntry(const library::QueueItem& queue_item);
+void DeleteLibraryEntry(const int id);
+void UpdateLibraryEntry(const library::QueueItem& queue_item);
 
-void DownloadImage(int id, const std::wstring& image_url);
+void DownloadImage(const int anime_id, const std::wstring& image_url);
 
-bool AddAuthenticationToRequest(Request& request);
-bool AddServiceDataToRequest(Request& request, int id);
-bool RequestNeedsAuthentication(RequestType request_type, ServiceId service_id);
-void SetActiveServiceForRequest(Request& request);
+bool IsUserAuthenticated();
+void InvalidateUserAuthentication();
+bool IsUserAccountAvailable();
+bool IsUserAuthenticationAvailable();
 
-RequestType ClientModeToRequestType(taiga::HttpClientMode client_mode);
-taiga::HttpClientMode RequestTypeToClientMode(RequestType request_type);
+void OnError(const RequestType type);
+bool OnTransfer(const RequestType type, const taiga::http::Transfer& transfer,
+                const std::wstring& status);
+void OnResponse(const RequestType type);
+
+void OnInvalidAnimeId(const int id);
 
 }  // namespace sync
-
-#endif  // TAIGA_SYNC_SYNC_H

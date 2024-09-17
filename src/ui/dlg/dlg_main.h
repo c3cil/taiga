@@ -1,30 +1,34 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef TAIGA_UI_DLG_MAIN_H
-#define TAIGA_UI_DLG_MAIN_H
+#pragma once
 
-#include "library/anime_filter.h"
-#include "win/ctrl/win_ctrl.h"
-#include "win/win_dialog.h"
-#include "win/win_gdi.h"
+#include <map>
+#include <vector>
 
-#define WM_TAIGA_SHOWMENU WM_USER + 1337
+#include <windows/win/common_controls.h>
+#include <windows/win/dialog.h>
+#include <windows/win/gdi.h>
+#include <windows/win/snappable.h>
+
+#include "media/anime_filter.h"
+
+constexpr unsigned int WM_TAIGA_SHOWMENU = WM_USER + 1337;
 
 namespace ui {
 
@@ -36,23 +40,25 @@ enum MainToolbarButtons {
   kToolbarButtonDebug = 207
 };
 
-enum SearchMode {
-  kSearchModeNone,
-  kSearchModeService,
-  kSearchModeFeed
+enum class SearchMode {
+  None,
+  Service,
+  Feed,
 };
 
 enum SidebarItems {
-  kSidebarItemNowPlaying = 0,
-  kSidebarItemAnimeList = 2,
-  kSidebarItemHistory = 3,
-  kSidebarItemStats = 4,
-  kSidebarItemSearch = 6,
-  kSidebarItemSeasons = 7,
-  kSidebarItemFeeds = 8
+  kSidebarItemNowPlaying,
+  kSidebarItemSeparator1,
+  kSidebarItemAnimeList,
+  kSidebarItemHistory,
+  kSidebarItemStats,
+  kSidebarItemSeparator2,
+  kSidebarItemSearch,
+  kSidebarItemSeasons,
+  kSidebarItemFeeds
 };
 
-class MainDialog : public win::Dialog {
+class MainDialog : public win::Dialog, public win::Snappable {
 public:
   MainDialog();
   virtual ~MainDialog() {}
@@ -115,6 +121,7 @@ public:
   class MainTree : public win::TreeView {
   public:
     LRESULT WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    bool IsSeparator(int page);
     BOOL IsVisible();
     void RefreshHistoryCounter();
     std::vector<HTREEITEM> hti;
@@ -145,10 +152,11 @@ public:
   // Search bar
   class SearchBar {
   public:
-    SearchBar() : mode(kSearchModeNone), parent(nullptr) {}
-    int mode;
+    SearchBar() : mode(SearchMode::None), parent(nullptr) {}
+    SearchMode mode;
     MainDialog* parent;
     anime::Filters filters;
+    std::map<int, std::wstring> text;
   } search_bar;
 
 private:
@@ -158,5 +166,3 @@ private:
 extern MainDialog DlgMain;
 
 }  // namespace ui
-
-#endif  // TAIGA_UI_DLG_MAIN_H

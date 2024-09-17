@@ -1,25 +1,27 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "base/foreach.h"
+#include "base/gfx.h"
 #include "base/string.h"
+#include "taiga/config.h"
 #include "taiga/resource.h"
-#include "taiga/taiga.h"
+#include "taiga/update.h"
+#include "taiga/version.h"
 #include "ui/dlg/dlg_update.h"
 #include "ui/dlg/dlg_update_new.h"
 #include "ui/theme.h"
@@ -40,7 +42,7 @@ BOOL NewUpdateDialog::OnInitDialog() {
                  L"A new version of " TAIGA_APP_NAME L" is available!");
 
   // Set details text
-  std::wstring text = L"Current version: " + std::wstring(Taiga.version);
+  std::wstring text = L"Current version: " + StrToWstr(taiga::version().to_string());
   SetDlgItemText(IDC_STATIC_UPDATE_DETAILS, text.c_str());
 
   // Set changelog text
@@ -50,12 +52,12 @@ BOOL NewUpdateDialog::OnInitDialog() {
       L"{\\f0 Segoe UI;}"
       L"}"
       L"\\deflang1024\\fs18";
-  foreach_(item, Taiga.Updater.items) {
-    base::SemanticVersion item_version(item->guid);
-    if (item_version > Taiga.version) {
-      changelog += L"\\b Version " + item->guid + L"\\b0\\line ";
-      std::wstring description = item->description;
-      Replace(description, L"\n", L"\\line ", true);
+  for (const auto& item : taiga::updater.items) {
+    semaver::Version item_version(WstrToStr(item.guid.value));
+    if (item_version > taiga::version()) {
+      changelog += L"\\b Version " + item.guid.value + L"\\b0\\line ";
+      std::wstring description = item.description;
+      ReplaceString(description, L"\n", L"\\line ");
       changelog += description + L"\\line\\line ";
     }
   }
@@ -70,7 +72,7 @@ BOOL NewUpdateDialog::OnInitDialog() {
 void NewUpdateDialog::OnOK() {
   EndDialog(IDOK);
 
-  if (!Taiga.Updater.Download())
+  if (!taiga::updater.Download())
     DlgUpdate.PostMessage(WM_CLOSE);
 }
 
@@ -78,6 +80,17 @@ void NewUpdateDialog::OnCancel() {
   EndDialog(IDCANCEL);
 
   DlgUpdate.PostMessage(WM_CLOSE);
+}
+
+void NewUpdateDialog::OnPaint(HDC hdc, LPPAINTSTRUCT lpps) {
+  win::Dc dc = hdc;
+
+  // Paint application icon
+  win::Rect rect;
+  win::Window label = GetDlgItem(IDC_STATIC_APP_ICON);
+  label.GetWindowRect(GetWindowHandle(), &rect);
+  label.SetWindowHandle(nullptr);
+  DrawIconResource(IDI_MAIN, dc.Get(), rect, true, false);
 }
 
 }  // namespace ui

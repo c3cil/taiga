@@ -1,30 +1,32 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <windowsx.h>
+
 #include "base/string.h"
-#include "library/history.h"
+#include "media/library/queue.h"
 #include "sync/sync.h"
 #include "taiga/debug.h"
 #include "taiga/resource.h"
-#include "taiga/script.h"
 #include "ui/dlg/dlg_anime_list.h"
 #include "ui/dlg/dlg_main.h"
 #include "ui/dlg/dlg_season.h"
+#include "ui/command.h"
 #include "ui/dialog.h"
 #include "ui/menu.h"
 #include "ui/theme.h"
@@ -41,8 +43,7 @@ LRESULT MainDialog::MainTree::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
     case WM_SETCURSOR: {
       TVHITTESTINFO ht = {0};
       HitTest(&ht, true);
-      int index = GetItemData(ht.hItem);
-      if (index == -1) {
+      if (IsSeparator(GetItemData(ht.hItem))) {
         SetSharedCursor(IDC_ARROW);
         return TRUE;
       }
@@ -55,9 +56,19 @@ LRESULT MainDialog::MainTree::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
 void MainDialog::MainTree::RefreshHistoryCounter() {
   std::wstring text = L"History";
-  int count = History.queue.GetItemCount();
+  int count = library::queue.GetItemCount();
   if (count > 0) text += L" (" + ToWstr(count) + L")";
   SetItem(hti.at(kSidebarItemHistory), text.c_str());
+}
+
+bool MainDialog::MainTree::IsSeparator(int page) {
+  switch (page) {
+    case kSidebarItemSeparator1:
+    case kSidebarItemSeparator2:
+      return true;
+    default:
+      return false;
+  }
 }
 
 BOOL MainDialog::MainTree::IsVisible() {
@@ -82,7 +93,7 @@ LRESULT MainDialog::OnTreeNotify(LPARAM lParam) {
           return CDRF_NOTIFYPOSTPAINT;
         case CDDS_ITEMPOSTPAINT: {
           // Draw separator
-          if (pCD->nmcd.lItemlParam == -1) {
+          if (treeview.IsSeparator(pCD->nmcd.lItemlParam)) {
             win::Rect rcItem = pCD->nmcd.rc;
             win::Dc hdc = pCD->nmcd.hdc;
             hdc.FillRect(rcItem, ::GetSysColor(COLOR_3DFACE));
@@ -106,19 +117,21 @@ LRESULT MainDialog::OnTreeNotify(LPARAM lParam) {
         case TVC_UNKNOWN:
           break;
         case TVC_BYMOUSE:
-        case TVC_BYKEYBOARD:
+        case TVC_BYKEYBOARD: {
+          int old_page = pnmtv->itemOld.lParam;
+          int new_page = pnmtv->itemNew.lParam;
           // Prevent selection of separators
-          if (pnmtv->itemNew.lParam == -1) {
-            if (pnmtv->action == TVC_BYKEYBOARD) {
-              // TODO: Should work upwards too
-              HTREEITEM hti = TreeView_GetNextItem(treeview.GetWindowHandle(),
-                                                   pnmtv->itemNew.hItem, TVGN_NEXT);
-              navigation.SetCurrentPage(treeview.GetItemData(hti));
-            }
-            return TRUE;
+          if (treeview.IsSeparator(new_page) &&
+              pnmtv->action == TVC_BYKEYBOARD) {
+            UINT flag = new_page > old_page ? TVGN_NEXT : TVGN_PREVIOUS;
+            HTREEITEM hti = treeview.GetNextItem(pnmtv->itemNew.hItem, flag);
+            if (hti)
+              new_page = treeview.GetItemData(hti);
           }
-          navigation.SetCurrentPage(pnmtv->itemNew.lParam);
-          break;
+          if (!treeview.IsSeparator(new_page))
+            navigation.SetCurrentPage(new_page);
+          return TRUE;
+        }
       }
       break;
     }
@@ -190,32 +203,35 @@ BOOL MainDialog::OnCommand(WPARAM wParam, LPARAM lParam) {
       return TRUE;
     // Settings
     case kToolbarButtonSettings:
-      ShowDialog(ui::kDialogSettings);
+      ShowDialog(ui::Dialog::Settings);
       return TRUE;
     // Debug
     case kToolbarButtonDebug:
-      debug::Test();
+      taiga::debug::Test();
       return TRUE;
   }
 
   // Search text
   if (HIWORD(wParam) == EN_CHANGE) {
     if (LOWORD(wParam) == IDC_EDIT_SEARCH) {
-      std::wstring text;
+      int current_page = navigation.GetCurrentPage();
+      auto& text = search_bar.text[current_page];
       edit.GetText(text);
       cancel_button.Show(text.empty() ? SW_HIDE : SW_SHOWNORMAL);
-      switch (navigation.GetCurrentPage()) {
+      switch (current_page) {
         case kSidebarItemAnimeList:
-          if (search_bar.filters.text != text) {
-            search_bar.filters.text = text;
-            DlgAnimeList.RefreshList();
-            DlgAnimeList.RefreshTabs();
-            return TRUE;
+          if (search_bar.filters.text[current_page] != text) {
+            if (text.empty() || text.size() > 1) {
+              search_bar.filters.text[current_page] = text;
+              DlgAnimeList.RefreshList();
+              DlgAnimeList.RefreshTabs();
+              return TRUE;
+            }
           }
           break;
         case kSidebarItemSeasons:
-          if (search_bar.filters.text != text) {
-            search_bar.filters.text = text;
+          if (search_bar.filters.text[current_page] != text) {
+            search_bar.filters.text[current_page] = text;
             DlgSeason.RefreshList();
             return TRUE;
           }
@@ -229,16 +245,11 @@ BOOL MainDialog::OnCommand(WPARAM wParam, LPARAM lParam) {
 
 LRESULT CALLBACK MainDialog::ToolbarWithMenu::HookProc(int code, WPARAM wParam, LPARAM lParam) {
   if (code == MSGF_MENU) {
-    MSG* msg = reinterpret_cast<MSG*>(lParam);
+    auto msg = reinterpret_cast<MSG*>(lParam);
 
     switch (msg->message) {
-      case WM_LBUTTONDOWN:
-      case WM_RBUTTONDOWN: {
-        break;
-      }
-
       case WM_MOUSEMOVE: {
-        POINT pt = {LOWORD(msg->lParam), HIWORD(msg->lParam)};
+        POINT pt = {GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
         ScreenToClient(DlgMain.toolbar_wm.toolbar->GetWindowHandle(), &pt);
 
         int button_index = DlgMain.toolbar_wm.toolbar->HitTest(pt);
@@ -249,7 +260,7 @@ LRESULT CALLBACK MainDialog::ToolbarWithMenu::HookProc(int code, WPARAM wParam, 
             button_index < button_count &&
             button_index != DlgMain.toolbar_wm.button_index) {
           if (button_style & BTNS_DROPDOWN || button_style & BTNS_WHOLEDROPDOWN) {
-            DlgMain.toolbar_wm.toolbar->SendMessage(TB_SETHOTITEM, button_index, 0);
+            DlgMain.toolbar_wm.toolbar->SetHotItem(button_index, HICF_MOUSE);
             return 0L;
           }
         }
@@ -299,11 +310,10 @@ LRESULT MainDialog::OnToolbarNotify(LPARAM lParam) {
 
     // Hot-tracking
     case TBN_HOTITEMCHANGE: {
-      LPNMTBHOTITEM lpnmhi = reinterpret_cast<LPNMTBHOTITEM>(lParam);
+      auto lpnmhi = reinterpret_cast<LPNMTBHOTITEM>(lParam);
       if (toolbar_wm.hook && lpnmhi->idNew > 0) {
-        toolbar_wm.toolbar->PressButton(lpnmhi->idOld, FALSE);
-        toolbar_wm.toolbar->SendMessage(lpnmhi->idNew, TRUE);
-        SendMessage(WM_CANCELMODE);
+        toolbar_wm.button_index = -1;
+        PostMessage(WM_CANCELMODE);
         PostMessage(WM_TAIGA_SHOWMENU);
       }
       break;
@@ -314,7 +324,7 @@ LRESULT MainDialog::OnToolbarNotify(LPARAM lParam) {
 }
 
 void MainDialog::ToolbarWithMenu::ShowMenu() {
-  button_index = toolbar->SendMessage(TB_GETHOTITEM);
+  button_index = toolbar->GetHotItem();
 
   TBBUTTON tbb;
   toolbar->GetButton(button_index, tbb);
@@ -327,14 +337,16 @@ void MainDialog::ToolbarWithMenu::ShowMenu() {
   ClientToScreen(toolbar->GetWindowHandle(), &pt);
 
   // Hook
-  if (hook) UnhookWindowsHookEx(hook);
+  if (hook)
+    UnhookWindowsHookEx(hook);
   hook = SetWindowsHookEx(WH_MSGFILTER, &HookProc, NULL, GetCurrentThreadId());
 
   // Display menu
-  std::wstring action;
+  ui::Menus.UpdateAll();
+  std::wstring command;
   HWND hwnd = DlgMain.GetWindowHandle();
   #define SHOWUIMENU(id, name) \
-    case id: action = ui::Menus.Show(hwnd, pt.x, pt.y, name); break;
+    case id: command = ui::Menus.Show(hwnd, pt.x, pt.y, name); break;
   switch (tbb.idCommand) {
     SHOWUIMENU(100, L"File");
     SHOWUIMENU(101, L"Services");
@@ -353,11 +365,11 @@ void MainDialog::ToolbarWithMenu::ShowMenu() {
   }
 
   toolbar->PressButton(tbb.idCommand, FALSE);
+  if (button_index > -1)
+    toolbar->SetHotItem(-1);
 
-  if (!action.empty()) {
-    ExecuteAction(action);
-    ui::Menus.UpdateAll(DlgAnimeList.GetCurrentItem());
-  }
+  if (!command.empty())
+    ExecuteCommand(command);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

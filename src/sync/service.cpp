@@ -1,61 +1,68 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "service.h"
+#include <map>
+
+#include "sync/service.h"
+
+#include "taiga/settings.h"
 
 namespace sync {
 
-Request::Request()
-    : service_id(kAllServices), type(kGenericRequest) {
+ServiceId GetCurrentServiceId() {
+  return taiga::settings.GetSyncActiveService();
 }
 
-Request::Request(RequestType type)
-    : service_id(kAllServices), type(type) {
+std::wstring GetCurrentServiceName() {
+  return GetServiceNameById(taiga::settings.GetSyncActiveService());
 }
 
-Response::Response()
-    : service_id(kAllServices), type(kGenericRequest) {
+std::wstring GetCurrentServiceSlug() {
+  return GetServiceSlugById(taiga::settings.GetSyncActiveService());
 }
 
-////////////////////////////////////////////////////////////////////////////////
+ServiceId GetServiceIdBySlug(const std::wstring& slug) {
+  static const std::map<std::wstring, ServiceId> services{
+    {L"myanimelist", ServiceId::MyAnimeList},
+    {L"kitsu", ServiceId::Kitsu},
+    {L"anilist", ServiceId::AniList},
+  };
 
-Service::Service()
-    : id_(0) {
+  const auto it = services.find(slug);
+  return it != services.end() ? it->second : ServiceId::Unknown;
 }
 
-bool Service::RequestNeedsAuthentication(RequestType request_type) const {
-  return false;
+std::wstring GetServiceNameById(const ServiceId service_id) {
+  switch (service_id) {
+    case ServiceId::MyAnimeList: return L"MyAnimeList";
+    case ServiceId::Kitsu: return L"Kitsu";
+    case ServiceId::AniList: return L"AniList";
+    default: return L"Taiga";
+  }
 }
 
-const string_t& Service::host() const {
-  return host_;
-}
-
-enum_t Service::id() const {
-  return id_;
-}
-
-const string_t& Service::canonical_name() const {
-  return canonical_name_;
-}
-
-const string_t& Service::name() const {
-  return name_;
+std::wstring GetServiceSlugById(const ServiceId service_id) {
+  switch (service_id) {
+    case ServiceId::MyAnimeList: return L"myanimelist";
+    case ServiceId::Kitsu: return L"kitsu";
+    case ServiceId::AniList: return L"anilist";
+    default: return L"taiga";
+  }
 }
 
 }  // namespace sync

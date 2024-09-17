@@ -1,58 +1,71 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "file.h"
-#include "log.h"
-#include "string.h"
+#include <limits>
+#include <set>
 
-FileSearchHelper::FileSearchHelper()
-    : minimum_file_size_(0),
-      skip_directories_(false),
-      skip_files_(false),
-      skip_subdirectories_(false) {
+#include <windows/win/error.h>
+
+#include "base/file_search.h"
+
+#include "base/file.h"
+#include "base/log.h"
+#include "base/string.h"
+
+namespace base {
+
+struct FileSearchHandleDeleter {
+  using pointer = HANDLE;
+  void operator()(pointer p) const { ::FindClose(p); }
+};
+
+using FileSearchHandle = std::unique_ptr<HANDLE, FileSearchHandleDeleter>;
+
+constexpr uint64_t GetFileSize(const WIN32_FIND_DATA& data) {
+  constexpr auto m = std::numeric_limits<decltype(data.nFileSizeLow)>::max();
+  return (data.nFileSizeHigh * (m + 1ull)) + data.nFileSizeLow;
 }
 
-bool FileSearchHelper::Search(const std::wstring& root) {
-  using namespace std::placeholders;
+////////////////////////////////////////////////////////////////////////////////
+// @TODO: Use std::filesystem?
 
-  return Search(root,
-      std::bind(&FileSearchHelper::OnDirectory, this, _1, _2, _3),
-      std::bind(&FileSearchHelper::OnFile, this, _1, _2, _3));
-}
-
-bool FileSearchHelper::Search(const std::wstring& root,
-                              callback_function_t OnDirectoryFunc,
-                              callback_function_t OnFileFunc) {
+bool FileSearch::Search(const std::wstring& root,
+                        callback_function_t on_directory,
+                        callback_function_t on_file) const {
   if (root.empty())
     return false;
-  if (skip_directories_ && skip_files_)
+  if (options.skip_directories && options.skip_files)
     return false;
 
-  std::wstring path = AddTrailingSlash(GetExtendedLengthPath(root)) + L"*";
-  bool result = false;
+  const auto path = AddTrailingSlash(GetExtendedLengthPath(root)) + L"*";
+  std::set<std::wstring> subdirectories;
 
   WIN32_FIND_DATA data;
-  HANDLE handle = FindFirstFile(path.c_str(), &data);
+  FileSearchHandle handle(::FindFirstFile(path.c_str(), &data));
 
   do {
-    if (handle == INVALID_HANDLE_VALUE) {
-      LOG(LevelError, Logger::FormatError(GetLastError()) + L"\nPath: " + path);
-      SetLastError(ERROR_SUCCESS);
+    if (handle.get() == INVALID_HANDLE_VALUE) {
+      if (options.log_errors) {
+        auto error_message = win::FormatError(::GetLastError());
+        TrimRight(error_message, L"\r\n");
+        LOGE(L"{}\nPath: {}", error_message, path);
+      }
+      ::SetLastError(ERROR_SUCCESS);
       continue;
     }
 
@@ -61,51 +74,32 @@ bool FileSearchHelper::Search(const std::wstring& root,
 
     // Directory
     if (IsDirectory(data)) {
-      if (skip_directories_)
-        continue;
       if (!IsValidDirectory(data))
         continue;
-      if (OnDirectoryFunc)
-        result = OnDirectoryFunc(root, data.cFileName, data);
-      if (!skip_subdirectories_ && !result)
-        result = Search(AddTrailingSlash(root) + data.cFileName);
+      if (!options.skip_directories)
+        if (on_directory && on_directory({root, data.cFileName, data}))
+          return true;
+      if (!options.skip_subdirectories)
+        subdirectories.insert(AddTrailingSlash(root) + data.cFileName);
 
     // File
     } else {
-      if (skip_files_)
+      if (options.skip_files)
         continue;
-      if (data.nFileSizeLow < minimum_file_size_)
+      if (GetFileSize(data) < options.min_file_size)
         continue;
-      if (OnFileFunc)
-        result = OnFileFunc(root, std::wstring(data.cFileName), data);
+      if (on_file && on_file({root, data.cFileName, data}))
+        return true;
     }
 
-  } while (!result && FindNextFile(handle, &data));
+  } while (::FindNextFile(handle.get(), &data));
 
-  FindClose(handle);
-  return result;
-}
+  for (const auto& subdirectory : subdirectories) {
+    if (Search(subdirectory, on_directory, on_file))
+      return true;
+  }
 
-bool FileSearchHelper::OnDirectory(const std::wstring& root,
-                                   const std::wstring& name,
-                                   const WIN32_FIND_DATA& data) {
   return false;
 }
 
-bool FileSearchHelper::OnFile(const std::wstring& root,
-                              const std::wstring& name,
-                              const WIN32_FIND_DATA& data) {
-  return false;
-}
-
-void FileSearchHelper::set_skip_directories(bool skip_directories) {
-  skip_directories_ = skip_directories;
-}
-
-void FileSearchHelper::set_skip_files(bool skip_files) {
-  skip_files_ = skip_files;
-}
-
-void FileSearchHelper::set_skip_subdirectories(bool skip_subdirectories) {
-  skip_subdirectories_ = skip_subdirectories;
-}
+}  // namespace base

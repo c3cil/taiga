@@ -1,46 +1,56 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef TAIGA_SYNC_MYANIMELIST_UTIL_H
-#define TAIGA_SYNC_MYANIMELIST_UTIL_H
+#pragma once
 
 #include <string>
+#include <vector>
+
+#include "sync/service.h"
+
+class Date;
 
 namespace anime {
+enum class AgeRating;
+enum class MyStatus;
+enum class SeriesStatus;
+enum class SeriesType;
 class Item;
 }
 
-namespace sync {
-namespace myanimelist {
+namespace sync::myanimelist {
 
-std::wstring DecodeText(std::wstring text);
-std::wstring EraseBbcode(std::wstring& str);
+std::vector<Rating> GetMyRatings();
 
-int TranslateSeriesStatusFrom(int value);
-int TranslateSeriesStatusFrom(const std::wstring& value);
-int TranslateSeriesTypeFrom(int value);
-int TranslateSeriesTypeFrom(const std::wstring& value);
-std::wstring TranslateMyDateTo(const std::wstring& value);
-int TranslateMyStatusFrom(int value);
-int TranslateMyStatusTo(int value);
-std::wstring TranslateKeyTo(const std::wstring& key);
+anime::AgeRating TranslateAgeRatingFrom(const std::wstring& value);
+Date TranslateDateFrom(const std::wstring& value);
+int TranslateEpisodeLengthFrom(int value);
+anime::SeriesStatus TranslateSeriesStatusFrom(const std::wstring& value);
+anime::SeriesType TranslateSeriesTypeFrom(const std::wstring& value);
+std::wstring TranslateMyLastUpdatedFrom(const std::string& value);
+std::wstring TranslateMyRating(int value, bool full);
+int TranslateMyRatingFrom(int value);
+int TranslateMyRatingTo(int value);
+anime::MyStatus TranslateMyStatusFrom(const std::wstring& value);
+std::string TranslateMyStatusTo(anime::MyStatus value);
 
 std::wstring GetAnimePage(const anime::Item& anime_item);
+void RequestAuthorizationCode(std::wstring& code_verifier);
 void ViewAnimePage(int anime_id);
 void ViewAnimeSearch(const std::wstring& title);
 void ViewHistory();
@@ -48,7 +58,4 @@ void ViewPanel();
 void ViewProfile();
 void ViewUpcomingAnime();
 
-}  // namespace myanimelist
-}  // namespace sync
-
-#endif  // TAIGA_SYNC_MYANIMELIST_UTIL_H
+}  // namespace sync::myanimelist

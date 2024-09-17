@@ -1,20 +1,22 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+
+#include "ui/dlg/dlg_format.h"
 
 #include "base/html.h"
 #include "base/string.h"
@@ -22,7 +24,6 @@
 #include "taiga/resource.h"
 #include "taiga/script.h"
 #include "taiga/settings.h"
-#include "ui/dlg/dlg_format.h"
 #include "ui/menu.h"
 
 namespace ui {
@@ -30,7 +31,7 @@ namespace ui {
 FormatDialog DlgFormat;
 
 FormatDialog::FormatDialog()
-    : mode(kFormatModeHttp) {
+    : mode(FormatDialogMode::Http) {
   RegisterDlgClass(L"TaigaFormatW");
 }
 
@@ -41,25 +42,17 @@ BOOL FormatDialog::OnInitDialog() {
 
   // Set text
   switch (mode) {
-    case kFormatModeHttp:
-      SetText(L"Edit format - HTTP request");
-      rich_edit_.SetText(Settings[taiga::kShare_Http_Format].c_str());
+    case FormatDialogMode::Http:
+      SetText(L"Edit Format - HTTP Request");
+      rich_edit_.SetText(taiga::settings.GetShareHttpFormat().c_str());
       break;
-    case kFormatModeMirc:
-      SetText(L"Edit format - mIRC");
-      rich_edit_.SetText(Settings[taiga::kShare_Mirc_Format].c_str());
+    case FormatDialogMode::Mirc:
+      SetText(L"Edit Format - mIRC");
+      rich_edit_.SetText(taiga::settings.GetShareMircFormat().c_str());
       break;
-    case kFormatModeSkype:
-      SetText(L"Edit format - Skype");
-      rich_edit_.SetText(Settings[taiga::kShare_Skype_Format].c_str());
-      break;
-    case kFormatModeTwitter:
-      SetText(L"Edit format - Twitter");
-      rich_edit_.SetText(Settings[taiga::kShare_Twitter_Format].c_str());
-      break;
-    case kFormatModeBalloon:
-      SetText(L"Edit format - Balloon tooltips");
-      rich_edit_.SetText(Settings[taiga::kSync_Notify_Format].c_str());
+    case FormatDialogMode::Balloon:
+      SetText(L"Edit Format - Episode Notifications");
+      rich_edit_.SetText(taiga::settings.GetSyncNotifyFormat().c_str());
       break;
   }
 
@@ -68,20 +61,14 @@ BOOL FormatDialog::OnInitDialog() {
 
 void FormatDialog::OnOK() {
   switch (mode) {
-    case kFormatModeHttp:
-      Settings.Set(taiga::kShare_Http_Format, rich_edit_.GetText());
+    case FormatDialogMode::Http:
+      taiga::settings.SetShareHttpFormat(rich_edit_.GetText());
       break;
-    case kFormatModeMirc:
-      Settings.Set(taiga::kShare_Mirc_Format, rich_edit_.GetText());
+    case FormatDialogMode::Mirc:
+      taiga::settings.SetShareMircFormat(rich_edit_.GetText());
       break;
-    case kFormatModeSkype:
-      Settings.Set(taiga::kShare_Skype_Format, rich_edit_.GetText());
-      break;
-    case kFormatModeTwitter:
-      Settings.Set(taiga::kShare_Twitter_Format, rich_edit_.GetText());
-      break;
-    case kFormatModeBalloon:
-      Settings.Set(taiga::kSync_Notify_Format, rich_edit_.GetText());
+    case FormatDialogMode::Balloon:
+      taiga::settings.SetSyncNotifyFormat(rich_edit_.GetText());
       break;
   }
 
@@ -93,13 +80,40 @@ BOOL FormatDialog::OnCommand(WPARAM wParam, LPARAM lParam) {
     // Add button
     case IDHELP: {
       std::wstring answer = ui::Menus.Show(GetWindowHandle(), 0, 0, L"ScriptAdd");
-      std::wstring str;
-      rich_edit_.GetText(str);
-      CHARRANGE cr = {0};
-      rich_edit_.GetSel(&cr);
-      str.insert(cr.cpMin, answer);
-      rich_edit_.SetText(str.c_str());
-      rich_edit_.SetFocus();
+      if (!answer.empty()) {
+        std::wstring str;
+        rich_edit_.GetText(str);
+        CHARRANGE cr = {0};
+        rich_edit_.GetSel(&cr);
+        str.replace(cr.cpMin, cr.cpMax - cr.cpMin, answer);
+        rich_edit_.SetText(str.c_str());
+        int pos = cr.cpMin + answer.size();
+        rich_edit_.SetSel(pos, pos);
+        rich_edit_.SetFocus();
+      }
+      return TRUE;
+    }
+
+    // Reset button
+    case IDABORT: {
+      base::Settings::value_t value;
+      switch (mode) {
+        case FormatDialogMode::Http:
+          value = taiga::settings.GetDefaultValue(
+              taiga::AppSettingKey::ShareHttpFormat);
+          break;
+        case FormatDialogMode::Mirc:
+          value = taiga::settings.GetDefaultValue(
+              taiga::AppSettingKey::ShareMircFormat);
+          break;
+        case FormatDialogMode::Balloon:
+          value = taiga::settings.GetDefaultValue(
+              taiga::AppSettingKey::SyncNotifyFormat);
+          break;
+      }
+      if (base::GetSettingValueType(value) == base::SettingValueType::Wstring) {
+        rich_edit_.SetText(std::get<std::wstring>(value));
+      }
       return TRUE;
     }
   }
@@ -183,39 +197,34 @@ void FormatDialog::RefreshPreviewText() {
   // Replace variables
   std::wstring str;
   GetDlgItemText(IDC_RICHEDIT_FORMAT, str);
-  anime::Episode* episode = &taiga::DummyEpisode;
+  anime::Episode* episode = &taiga::dummy_episode;
   if (CurrentEpisode.anime_id > 0)
     episode = &CurrentEpisode;
   str = ReplaceVariables(str, *episode, false, false, true);
 
   switch (mode) {
-    case kFormatModeMirc: {
+    case FormatDialogMode::Mirc: {
       // Strip IRC characters
       for (size_t i = 0; i < str.length(); i++) {
-        if (str[i] == 0x02 || // Bold
-            str[i] == 0x16 || // Reverse
-            str[i] == 0x1D || // Italic
-            str[i] == 0x1F || // Underline
-            str[i] == 0x0F) { // Disable all
+        if (str[i] == 0x02 ||  // Bold
+            str[i] == 0x16 ||  // Reverse
+            str[i] == 0x1D ||  // Italic
+            str[i] == 0x1F ||  // Underline
+            str[i] == 0x0F) {  // Disable all
           str.erase(i, 1);
           i--; continue;
         }
         // Color code
         if (str[i] == 0x03) {
           str.erase(i, 1);
-          if (IsNumeric(str[i]))
+          if (IsNumericChar(str[i]))
             str.erase(i, 1);
-          if (IsNumeric(str[i]))
+          if (IsNumericChar(str[i]))
             str.erase(i, 1);
           i--;
           continue;
         }
       }
-      break;
-    }
-    case kFormatModeSkype: {
-      // Strip HTML codes
-      StripHtmlTags(str);
       break;
     }
   }

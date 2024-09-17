@@ -1,23 +1,22 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef TAIGA_BASE_TIMER_H
-#define TAIGA_BASE_TIMER_H
+#pragma once
 
 #include <map>
 #include <windows.h>
@@ -52,16 +51,15 @@ protected:
   virtual void OnTimeout() = 0;
 
 private:
-  bool enabled_;
-  unsigned int id_;
-  int interval_;
-  bool repeat_;
-  int ticks_;
+  bool enabled_ = true;
+  unsigned int id_ = 0;
+  int interval_ = 0;
+  bool repeat_ = true;
+  int ticks_ = 0;
 };
 
 class TimerManager {
 public:
-  TimerManager();
   virtual ~TimerManager();
 
   Timer* timer(unsigned int id);
@@ -72,11 +70,9 @@ public:
   virtual void OnTick() = 0;
 
 protected:
-  HWND hwnd_;
-  UINT_PTR id_;
+  HWND hwnd_ = nullptr;
+  UINT_PTR id_ = 0;
   std::map<unsigned int, Timer*> timers_;
 };
 
 }  // namespace base
-
-#endif  // TAIGA_BASE_TIMER_H

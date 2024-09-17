@@ -1,28 +1,27 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "timer.h"
+#include "base/timer.h"
 
 namespace base {
 
 Timer::Timer(unsigned int id, int interval, bool repeat)
-    : enabled_(true),
-      id_(id),
+    : id_(id),
       interval_(interval),
       repeat_(repeat),
       ticks_(interval) {
@@ -101,20 +100,14 @@ void Timer::Tick() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TimerManager::TimerManager()
-    : hwnd_(nullptr), id_(0) {
-}
-
 TimerManager::~TimerManager() {
-  if (id_ != 0)
+  if (id_)
     ::KillTimer(hwnd_, id_);
 }
 
 Timer* TimerManager::timer(unsigned int id) {
-  if (timers_.find(id) != timers_.end())
-    return timers_[id];
-
-  return nullptr;
+  const auto it = timers_.find(id);
+  return it != timers_.end() ? it->second : nullptr;
 }
 
 bool TimerManager::Initialize(HWND hwnd, TIMERPROC proc) {
@@ -125,7 +118,7 @@ bool TimerManager::Initialize(HWND hwnd, TIMERPROC proc) {
 }
 
 void TimerManager::InsertTimer(const Timer* timer) {
-  timers_.insert(std::make_pair(timer->id(), const_cast<Timer*>(timer)));
+  timers_.insert({timer->id(), const_cast<Timer*>(timer)});
 }
 
 }  // namespace base

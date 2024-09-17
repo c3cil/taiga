@@ -1,41 +1,50 @@
 /*
 ** Taiga
-** Copyright (C) 2010-2014, Eren Okka
-** 
+** Copyright (C) 2010-2021, Eren Okka
+**
 ** This program is free software: you can redistribute it and/or modify
 ** it under the terms of the GNU General Public License as published by
 ** the Free Software Foundation, either version 3 of the License, or
 ** (at your option) any later version.
-** 
+**
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ** GNU General Public License for more details.
-** 
+**
 ** You should have received a copy of the GNU General Public License
 ** along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <windows/win/task_dialog.h>
+
+#include "base/file.h"
 #include "base/process.h"
 #include "base/string.h"
-#include "library/anime.h"
-#include "library/anime_db.h"
-#include "library/anime_util.h"
-#include "library/history.h"
-#include "library/resource.h"
+#include "media/anime.h"
+#include "media/anime_db.h"
+#include "media/anime_util.h"
+#include "media/anime_season_db.h"
+#include "media/library/queue.h"
+#include "ui/resource.h"
+#include "sync/myanimelist_util.h"
 #include "sync/service.h"
 #include "sync/sync.h"
 #include "taiga/announce.h"
+#include "taiga/app.h"
+#include "taiga/config.h"
 #include "taiga/resource.h"
 #include "taiga/script.h"
 #include "taiga/settings.h"
 #include "taiga/stats.h"
-#include "taiga/taiga.h"
 #include "taiga/timer.h"
+#include "track/episode_util.h"
 #include "track/media.h"
 #include "track/monitor.h"
+#include "track/feed_aggregator.h"
+#include "track/play.h"
 #include "track/recognition.h"
-#include "track/search.h"
+#include "track/scanner.h"
 #include "ui/dialog.h"
 #include "ui/dlg/dlg_anime_info.h"
 #include "ui/dlg/dlg_anime_list.h"
@@ -47,10 +56,10 @@
 #include "ui/dlg/dlg_stats.h"
 #include "ui/dlg/dlg_torrent.h"
 #include "ui/dlg/dlg_update.h"
+#include "ui/command.h"
 #include "ui/menu.h"
 #include "ui/theme.h"
-#include "win/win_taskbar.h"
-#include "win/win_taskdialog.h"
+#include "ui/ui.h"
 
 namespace ui {
 
@@ -65,9 +74,10 @@ MainDialog::MainDialog() {
 
 BOOL MainDialog::OnInitDialog() {
   // Initialize window properties
-  InitWindowPosition();
   SetIconLarge(IDI_MAIN);
   SetIconSmall(IDI_MAIN);
+  SetSizeMin(320, 240);
+  SetSnapGap(10);
 
   // Create default brushes and fonts
   ui::Theme.CreateBrushes();
@@ -76,14 +86,11 @@ BOOL MainDialog::OnInitDialog() {
   // Create controls
   CreateDialogControls();
 
-  // Select default content page
-  navigation.SetCurrentPage(kSidebarItemAnimeList);
-
   // Start process timer
   taiga::timers.Initialize();
 
   // Add icon to taskbar
-  Taskbar.Create(GetWindowHandle(), nullptr, TAIGA_APP_TITLE);
+  taskbar.Create(GetWindowHandle(), kAppSysTrayId, nullptr, TAIGA_APP_NAME);
 
   ChangeStatus();
   UpdateTip();
@@ -92,33 +99,35 @@ BOOL MainDialog::OnInitDialog() {
   // Refresh menus
   ui::Menus.UpdateAll();
 
-  // Apply start-up settings
-  if (Settings.GetBool(taiga::kSync_AutoOnStart)) {
+  // Apply startup settings
+  if (taiga::settings.GetSyncAutoOnStart()) {
     sync::Synchronize();
   }
-  if (Settings.GetBool(taiga::kApp_Behavior_ScanAvailableEpisodes)) {
+  if (taiga::settings.GetAppBehaviorScanAvailableEpisodes()) {
     ScanAvailableEpisodesQuick();
   }
-  if (!Settings.GetBool(taiga::kApp_Behavior_StartMinimized)) {
-    Show(Settings.GetBool(taiga::kApp_Position_Remember) && Settings.GetBool(taiga::kApp_Position_Maximized) ?
-      SW_MAXIMIZE : SW_SHOWNORMAL);
-  }
-  if (taiga::GetCurrentUsername().empty()) {
-    win::TaskDialog dlg(TAIGA_APP_TITLE, TD_ICON_INFORMATION);
+
+  // Select default content page
+  navigation.SetCurrentPage(kSidebarItemAnimeList);
+
+  // Display window
+  InitWindowPosition();
+
+  if (!sync::IsUserAccountAvailable()) {
+    win::TaskDialog dlg(TAIGA_APP_NAME, TD_ICON_INFORMATION);
     dlg.SetMainInstruction(L"Welcome to Taiga!");
-    dlg.SetContent(L"Username is not set. Would you like to open settings window to set it now?");
+    dlg.SetContent(L"Would you like set up your account now?");
     dlg.AddButton(L"Yes", IDYES);
     dlg.AddButton(L"No", IDNO);
     dlg.Show(GetWindowHandle());
     if (dlg.GetSelectedButtonID() == IDYES)
       ShowDlgSettings(kSettingsSectionServices, kSettingsPageServicesMain);
   }
-  if (Settings.GetBool(taiga::kLibrary_WatchFolders)) {
-    FolderMonitor.SetWindowHandle(GetWindowHandle());
-    FolderMonitor.Enable();
+  if (taiga::settings.GetLibraryWatchFolders()) {
+    track::monitor.SetWindowHandle(GetWindowHandle());
+    track::monitor.Enable();
   }
 
-  // Success
   return TRUE;
 }
 
@@ -130,78 +139,83 @@ void MainDialog::CreateDialogControls() {
   toolbar_menu.SetImageList(nullptr, 0, 0);
   // Create main toolbar
   toolbar_main.Attach(GetDlgItem(IDC_TOOLBAR_MAIN));
-  toolbar_main.SetImageList(ui::Theme.GetImageList24().GetHandle(), 24, 24);
+  toolbar_main.SetImageList(ui::Theme.GetImageList24().GetHandle(), ScaleX(24), ScaleY(24));
   toolbar_main.SendMessage(TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS | TBSTYLE_EX_MIXEDBUTTONS);
+  toolbar_main.SendMessage(TB_SETBUTTONSIZE, 0, MAKELPARAM(ScaleX(24), ScaleY(24)));
   // Create search toolbar
   toolbar_search.Attach(GetDlgItem(IDC_TOOLBAR_SEARCH));
-  toolbar_search.SetImageList(ui::Theme.GetImageList24().GetHandle(), 24, 24);
+  toolbar_search.SetImageList(nullptr, 0, 0);
   toolbar_search.SendMessage(TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS | TBSTYLE_EX_MIXEDBUTTONS);
+  toolbar_search.SendMessage(TB_SETBUTTONSIZE, 0, MAKELPARAM(ScaleX(24), ScaleY(24)));
   // Create search text
   edit.Attach(GetDlgItem(IDC_EDIT_SEARCH));
   edit.SetCueBannerText(L"Search list");
-  edit.SetMargins(1, 16);
+  edit.SetMargins(ScaleX(2), ScaleX(16));
   edit.SetParent(toolbar_search.GetWindowHandle());
-  win::Rect rcEdit; edit.GetRect(&rcEdit);
   win::Rect rcEditWindow; edit.GetWindowRect(&rcEditWindow);
   win::Rect rcToolbar; toolbar_search.GetClientRect(&rcToolbar);
-  int edit_y = (30 /*rcToolbar.Height()*/ - rcEditWindow.Height()) / 2;
-  edit.SetPosition(nullptr, 0, edit_y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+  rcEditWindow.bottom = rcEditWindow.top + ScaleY(22);
+  int edit_y = (ScaleY(24) - rcEditWindow.Height()) / 2;
+  edit.SetPosition(nullptr, 0, edit_y, rcEditWindow.Width(), rcEditWindow.Height(),
+                   SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
   // Create cancel search button
   cancel_button.Attach(GetDlgItem(IDC_BUTTON_CANCELSEARCH));
   cancel_button.SetParent(edit.GetWindowHandle());
+  win::Rect rcEdit;
+  edit.GetClientRect(&rcEdit);
   win::Rect rcButton;
-  rcButton.left = rcEdit.right;
-  edit.GetWindowRect(&rcEdit);
-  rcButton.top = static_cast<LONG>(std::floor((rcEdit.Height() - 2 - 16) / 2));
-  rcButton.right = rcButton.left + 16;
-  rcButton.bottom = rcButton.top + 16;
+  rcButton.left = rcEdit.right - ScaleX(16);
+  rcButton.top = static_cast<LONG>(std::floor((rcEdit.Height() - ScaleY(16)) / 2.0));
+  rcButton.right = rcButton.left + ScaleX(16);
+  rcButton.bottom = rcButton.top + ScaleY(16);
   cancel_button.SetPosition(nullptr, rcButton);
   // Create treeview control
   treeview.Attach(GetDlgItem(IDC_TREE_MAIN));
   treeview.SendMessage(TVM_SETBKCOLOR, 0, ::GetSysColor(COLOR_3DFACE));
   treeview.SetImageList(ui::Theme.GetImageList16().GetHandle());
-  treeview.SetItemHeight(20);
+  treeview.SetItemHeight(ScaleY(20));
   treeview.SetTheme();
-  if (Settings.GetBool(taiga::kApp_Option_HideSidebar)) {
+  if (taiga::settings.GetAppOptionHideSidebar()) {
     treeview.Hide();
   }
   // Create status bar
   statusbar.Attach(GetDlgItem(IDC_STATUSBAR_MAIN));
   statusbar.SetImageList(ui::Theme.GetImageList16().GetHandle());
-  statusbar.InsertPart(-1, 0, 0, 900, nullptr, nullptr);
-  statusbar.InsertPart(ui::kIcon16_Clock, 0, 0, 32, nullptr, nullptr);
-  statusbar.InsertPart(ui::kIcon16_Cross, 0, 0, 32, nullptr, nullptr);
+  statusbar.InsertPart(-1, 0, 0, ScaleX(900), nullptr, nullptr);
+  statusbar.InsertPart(ui::kIcon16_Clock, 0, 0, ScaleX(32), nullptr, nullptr);
+  statusbar.InsertPart(ui::kIcon16_Cross, 0, 0, ScaleX(32), nullptr, nullptr);
 
   // Insert treeview items
   treeview.hti.push_back(treeview.InsertItem(L"Now Playing", ui::kIcon16_Play, kSidebarItemNowPlaying, nullptr));
-  treeview.hti.push_back(treeview.InsertItem(nullptr, -1, -1, nullptr));
+  treeview.hti.push_back(treeview.InsertItem(nullptr, -1, kSidebarItemSeparator1, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"Anime List", ui::kIcon16_DocumentA, kSidebarItemAnimeList, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"History", ui::kIcon16_Clock, kSidebarItemHistory, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"Statistics", ui::kIcon16_Chart, kSidebarItemStats, nullptr));
-  treeview.hti.push_back(treeview.InsertItem(nullptr, -1, -1, nullptr));
+  treeview.hti.push_back(treeview.InsertItem(nullptr, -1, kSidebarItemSeparator2, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"Search", ui::kIcon16_Search, kSidebarItemSearch, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"Seasons", ui::kIcon16_Calendar, kSidebarItemSeasons, nullptr));
   treeview.hti.push_back(treeview.InsertItem(L"Torrents", ui::kIcon16_Feed, kSidebarItemFeeds, nullptr));
-  if (History.queue.GetItemCount() > 0) {
+  if (library::queue.GetItemCount() > 0) {
     treeview.RefreshHistoryCounter();
   }
 
   // Insert menu toolbar buttons
   BYTE fsState = TBSTATE_ENABLED;
   BYTE fsStyle0 = BTNS_AUTOSIZE | BTNS_DROPDOWN | BTNS_SHOWTEXT;
-  toolbar_menu.InsertButton(0, I_IMAGENONE, 100, fsState, fsStyle0, 0, L"  File", nullptr);
-  toolbar_menu.InsertButton(1, I_IMAGENONE, 101, fsState, fsStyle0, 0, L"  Services", nullptr);
-  toolbar_menu.InsertButton(2, I_IMAGENONE, 102, fsState, fsStyle0, 0, L"  Tools", nullptr);
-  toolbar_menu.InsertButton(3, I_IMAGENONE, 103, fsState, fsStyle0, 0, L"  View", nullptr);
-  toolbar_menu.InsertButton(4, I_IMAGENONE, 104, fsState, fsStyle0, 0, L"  Help", nullptr);
+  toolbar_menu.InsertButton(0, I_IMAGENONE, 100, fsState, fsStyle0, 0, L"  &File", nullptr);
+  toolbar_menu.InsertButton(1, I_IMAGENONE, 101, fsState, fsStyle0, 0, L"  &Services", nullptr);
+  toolbar_menu.InsertButton(2, I_IMAGENONE, 102, fsState, fsStyle0, 0, L"  &Tools", nullptr);
+  toolbar_menu.InsertButton(3, I_IMAGENONE, 103, fsState, fsStyle0, 0, L"  &View", nullptr);
+  toolbar_menu.InsertButton(4, I_IMAGENONE, 104, fsState, fsStyle0, 0, L"  &Help", nullptr);
   // Insert main toolbar buttons
   BYTE fsStyle1 = BTNS_AUTOSIZE;
   BYTE fsStyle2 = BTNS_AUTOSIZE | BTNS_WHOLEDROPDOWN;
+  std::wstring tooltip = L"Synchronize list with " + sync::GetCurrentServiceName();
   toolbar_main.InsertButton(0, ui::kIcon24_Sync, kToolbarButtonSync,
-                            fsState, fsStyle1, 0, nullptr, L"Synchronize list");
+                            fsState, fsStyle1, 0, nullptr, tooltip.c_str());
   toolbar_main.InsertButton(1, 0, 0, 0, BTNS_SEP, 0, nullptr, nullptr);
   toolbar_main.InsertButton(2, ui::kIcon24_Folders, kToolbarButtonFolders,
-                            fsState, fsStyle2, 2, nullptr, L"Root folders");
+                            fsState, fsStyle2, 2, nullptr, L"Library folders");
   toolbar_main.InsertButton(3, ui::kIcon24_Tools, kToolbarButtonTools,
                             fsState, fsStyle2, 3, nullptr, L"External links");
   toolbar_main.InsertButton(4, 0, 0, 0, BTNS_SEP, 0, nullptr, nullptr);
@@ -218,65 +232,66 @@ void MainDialog::CreateDialogControls() {
   UINT fStyle = RBBS_NOGRIPPER;
   rebar.InsertBand(toolbar_menu.GetWindowHandle(),
     GetSystemMetrics(SM_CXSCREEN),
-    0, 0, 0, 0, 0, 0,
+    -2, 0, 0, 0, 0, 0,
     HIWORD(toolbar_menu.GetButtonSize()),
     fMask, fStyle);
   rebar.InsertBand(toolbar_main.GetWindowHandle(),
     GetSystemMetrics(SM_CXSCREEN),
-    win::kControlMargin, 0, 0, 0, 0, 0,
+    kControlMargin - 2, 0, 0, 0, 0, 0,
     HIWORD(toolbar_main.GetButtonSize()) + 2,
     fMask, fStyle | RBBS_BREAK);
   rebar.InsertBand(toolbar_search.GetWindowHandle(),
-    0, win::kControlMargin, 0, rcEditWindow.Width() + (win::kControlMargin * 2), 0, 0, 0,
+    0, kControlMargin, 0, rcEditWindow.Width() + kControlMargin, 0, 0, 0,
     HIWORD(toolbar_search.GetButtonSize()),
     fMask, fStyle);
 }
 
 void MainDialog::InitWindowPosition() {
-  UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
-  const LONG min_w = ScaleX(710);
-  const LONG min_h = ScaleX(480);
+  win::Rect rcWindow(
+      taiga::settings.GetAppPositionX(),
+      taiga::settings.GetAppPositionY(),
+      taiga::settings.GetAppPositionX() + taiga::settings.GetAppPositionW(),
+      taiga::settings.GetAppPositionY() + taiga::settings.GetAppPositionH());
 
-  win::Rect rcParent, rcWindow;
-  ::GetWindowRect(GetParent(), &rcParent);
-  rcWindow.Set(
-    Settings.GetInt(taiga::kApp_Position_X),
-    Settings.GetInt(taiga::kApp_Position_Y),
-    Settings.GetInt(taiga::kApp_Position_X) + Settings.GetInt(taiga::kApp_Position_W),
-    Settings.GetInt(taiga::kApp_Position_Y) + Settings.GetInt(taiga::kApp_Position_H));
+  bool first_time = rcWindow.left == -1 && rcWindow.top == -1;
+  bool center_owner = first_time;
 
-  if (rcWindow.left < 0 || rcWindow.left >= rcParent.right ||
-      rcWindow.top < 0 || rcWindow.top >= rcParent.bottom) {
-    flags |= SWP_NOMOVE;
-  }
-  if (rcWindow.Width() < min_w) {
-    rcWindow.right = rcWindow.left + min_w;
-  }
-  if (rcWindow.Height() < min_h) {
-    rcWindow.bottom = rcWindow.top + min_h;
-  }
-  if (rcWindow.Width() > rcParent.Width()) {
-    rcWindow.right = rcParent.left + rcParent.Width();
-  }
-  if (rcWindow.Height() > rcParent.Height()) {
-    rcWindow.bottom = rcParent.top + rcParent.Height();
-  }
-  if (rcWindow.Width() > 0 && rcWindow.Height() > 0 &&
-      !Settings.GetBool(taiga::kApp_Position_Maximized) &&
-      Settings.GetBool(taiga::kApp_Position_Remember)) {
-    SetPosition(nullptr, rcWindow, flags);
-    if (flags & SWP_NOMOVE) {
-      CenterOwner();
+  WINDOWPLACEMENT wp = {0};
+  wp.length = sizeof(WINDOWPLACEMENT);
+  wp.showCmd = SW_SHOWNORMAL;
+
+  if (taiga::settings.GetAppPositionRemember()) {
+    CopyRect(&wp.rcNormalPosition, &rcWindow);
+    if (taiga::settings.GetAppPositionMaximized()) {
+      wp.flags = WPF_RESTORETOMAXIMIZED;
+      wp.showCmd = SW_SHOWMAXIMIZED;
     }
+  } else {
+    wp.rcNormalPosition = {0, 0, 960, 640};
+    center_owner = true;
   }
 
-  SetSizeMin(min_w, min_h);
-  SetSnapGap(10);
+  if (taiga::settings.GetAppBehaviorStartMinimized()) {
+    wp.showCmd = SW_SHOWMINIMIZED;
+  }
+
+  SetPlacement(wp);
+
+  if (center_owner)
+    CenterOwner();
+
+  if (taiga::settings.GetAppBehaviorStartMinimized() &&
+      taiga::settings.GetAppBehaviorMinimizeToTray()) {
+    Show(SW_HIDE);
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 INT_PTR MainDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+  if (SnapProc(hwnd, uMsg, wParam, lParam))
+    return TRUE;
+
   switch (uMsg) {
     // Log off / Shutdown
     case WM_ENDSESSION: {
@@ -286,7 +301,7 @@ INT_PTR MainDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
     // Monitor anime folders
     case WM_MONITORCALLBACK: {
-      FolderMonitor.OnChange(*reinterpret_cast<FolderInfo*>(lParam));
+      track::monitor.Callback(*reinterpret_cast<DirectoryChangeEntry*>(lParam));
       return TRUE;
     }
 
@@ -301,8 +316,65 @@ INT_PTR MainDialog::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 }
 
 BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
+  auto handle_menu_accelerator = [&]() {
+    UINT command_id = 0;
+    if ((pMsg->wParam >= 'A' && pMsg->wParam <= 'Z') &&
+        toolbar_menu.MapAcelerator(pMsg->wParam, command_id)) {
+      int button_index = toolbar_menu.GetButtonIndex(command_id);
+      toolbar_menu.SetHotItem(button_index, HICF_ACCELERATOR);
+      toolbar_wm.toolbar = &toolbar_menu;
+      toolbar_wm.ShowMenu();
+      return true;
+    }
+    return false;
+  };
+
+  auto is_anime_list_focused = [&]() {
+    return navigation.GetCurrentPage() == kSidebarItemAnimeList &&
+        ::GetFocus() == DlgAnimeList.listview.GetWindowHandle() &&
+        DlgAnimeList.listview.GetSelectedCount() > 0;
+  };
+
   switch (pMsg->message) {
     case WM_KEYDOWN: {
+      // Menubar
+      auto hot_item = toolbar_menu.GetHotItem();
+      if (hot_item > -1) {
+        switch (pMsg->wParam) {
+          case VK_ESCAPE: {
+            toolbar_menu.SetHotItem(-1);
+            return TRUE;
+          }
+          case VK_RETURN:
+          case VK_UP:
+          case VK_DOWN: {
+            toolbar_wm.toolbar = &toolbar_menu;
+            toolbar_wm.ShowMenu();
+            return TRUE;
+          }
+          case VK_LEFT:
+          case VK_RIGHT: {
+            switch (pMsg->wParam) {
+              case VK_LEFT:
+                if (--hot_item < 0)
+                  hot_item = toolbar_menu.GetButtonCount() - 1;
+                break;
+              case VK_RIGHT:
+                if (++hot_item == toolbar_menu.GetButtonCount())
+                  hot_item = 0;
+                break;
+            }
+            toolbar_menu.SetHotItem(hot_item, HICF_ARROWKEYS);
+            return TRUE;
+          }
+          default: {
+            if (handle_menu_accelerator())
+              return TRUE;
+            break;
+          }
+        }
+      }
+
       switch (pMsg->wParam) {
         // Clear search text
         case VK_ESCAPE: {
@@ -333,14 +405,16 @@ BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
           if (::GetFocus() == edit.GetWindowHandle()) {
             std::wstring text;
             edit.GetText(text);
-            if (text.empty()) break;
+            if (text.empty())
+              break;
             switch (search_bar.mode) {
-              case kSearchModeService: {
-                ExecuteAction(L"SearchAnime(" + text + L")");
+              case SearchMode::Service: {
+                BOOL local_search = GetKeyState(VK_CONTROL) & 0x8000;
+                ExecuteCommand(L"SearchAnime(" + text + L")", local_search);
                 return TRUE;
               }
-              case kSearchModeFeed: {
-                DlgTorrent.Search(Settings[taiga::kTorrent_Discovery_SearchUrl], text);
+              case SearchMode::Feed: {
+                DlgTorrent.Search(taiga::settings.GetTorrentDiscoverySearchUrl(), text);
                 return TRUE;
               }
             }
@@ -361,6 +435,35 @@ BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
           edit.SetSel(0, -1);
           return TRUE;
         }
+        // Play next episode
+        case 'N': {
+          if ((GetKeyState(VK_CONTROL) & 0x8000) && !is_anime_list_focused()) {
+            track::PlayNextEpisodeOfLastWatchedAnime();
+            return TRUE;
+          }
+          break;
+        }
+        // Play random anime
+        case 'R': {
+          if ((GetKeyState(VK_CONTROL) & 0x8000) && !is_anime_list_focused()) {
+            track::PlayRandomAnime();
+            return TRUE;
+          }
+          break;
+        }
+        // Synchronize list
+        case 'S': {
+          if (GetKeyState(VK_CONTROL) & 0x8000) {
+            sync::Synchronize();
+            return TRUE;
+          }
+          break;
+        }
+        // Help
+        case VK_F1: {
+          ExecuteLink(L"https://taiga.moe/#support");
+          return TRUE;
+        }
         // Various
         case VK_F5: {
           switch (navigation.GetCurrentPage()) {
@@ -375,7 +478,7 @@ BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
               return TRUE;
             case kSidebarItemStats:
               // Refresh stats
-              Stats.CalculateAll();
+              taiga::stats.CalculateAll();
               DlgStats.Refresh();
               return TRUE;
             case kSidebarItemSearch:
@@ -384,20 +487,45 @@ BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
               return TRUE;
             case kSidebarItemSeasons:
               // Refresh season data
-              DlgSeason.RefreshData();
+              sync::GetSeason(anime::season_db.current_season);
               return TRUE;
             case kSidebarItemFeeds: {
               // Check new torrents
-              Feed* feed = Aggregator.Get(kFeedCategoryLink);
-              if (feed) {
-                edit.SetText(L"");
-                feed->Check(Settings[taiga::kTorrent_Discovery_Source]);
-                return TRUE;
-              }
-              break;
+              edit.SetText(L"");
+              track::aggregator.CheckFeed(taiga::settings.GetTorrentDiscoverySource());
+              return TRUE;
             }
           }
           break;
+        }
+      }
+      break;
+    }
+
+    case WM_SYSKEYDOWN: {
+      if (IsNumericChar(pMsg->wParam)) {
+        const int index = (pMsg->wParam - '0') - 1;
+        const auto library_folders = taiga::settings.GetLibraryFolders();
+        if (index >= 0 &&
+            index < static_cast<int>(library_folders.size())) {
+          Execute(library_folders.at(index));
+          return TRUE;
+        }
+      } else if (handle_menu_accelerator()) {
+        return TRUE;
+      }
+      break;
+    }
+    case WM_SYSKEYUP: {
+      switch (pMsg->wParam) {
+        case VK_MENU:
+        case VK_F10: {
+          if (!(GetKeyState(VK_SHIFT) & 0x8000)) {
+            auto hot_item = toolbar_menu.GetHotItem();
+            hot_item = hot_item == -1 ? 0 : -1;
+            toolbar_menu.SetHotItem(hot_item, HICF_ACCELERATOR);
+          }
+          return TRUE;
         }
       }
       break;
@@ -445,13 +573,25 @@ BOOL MainDialog::PreTranslateMessage(MSG* pMsg) {
     }
   }
 
+  if (pMsg->message >= WM_KEYFIRST && pMsg->message <= WM_KEYLAST) {
+    switch (pMsg->wParam) {
+      case VK_ESCAPE:
+      case VK_RETURN:
+        break;  // We don't want to close the dialogs
+      default:
+        if (!IsModal() && IsDialogMessage(GetWindowHandle(), pMsg)) {
+          return TRUE;
+        }
+    }
+  }
+
   return FALSE;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 BOOL MainDialog::OnClose() {
-  if (Settings.GetBool(taiga::kApp_Behavior_CloseToTray)) {
+  if (taiga::settings.GetAppBehaviorCloseToTray()) {
     Hide();
     return TRUE;
   }
@@ -460,27 +600,28 @@ BOOL MainDialog::OnClose() {
 }
 
 BOOL MainDialog::OnDestroy() {
-  if (Settings.GetBool(taiga::kApp_Position_Remember)) {
-    Settings.Set(taiga::kApp_Position_Maximized, (GetWindowLong() & WS_MAXIMIZE) ? true : false);
-    if (!Settings.GetBool(taiga::kApp_Position_Maximized)) {
-      bool invisible = !IsVisible();
-      if (invisible) ActivateWindow(GetWindowHandle());
-      win::Rect rcWindow; GetWindowRect(&rcWindow);
-      if (invisible) Hide();
-      Settings.Set(taiga::kApp_Position_X, rcWindow.left);
-      Settings.Set(taiga::kApp_Position_Y, rcWindow.top);
-      Settings.Set(taiga::kApp_Position_W, rcWindow.Width());
-      Settings.Set(taiga::kApp_Position_H, rcWindow.Height());
+  if (taiga::settings.GetAppPositionRemember()) {
+    WINDOWPLACEMENT wp = {0};
+    wp.length = sizeof(WINDOWPLACEMENT);
+    if (GetPlacement(wp)) {
+      bool maximized = wp.showCmd == SW_SHOWMAXIMIZED;
+      bool restore_to_maximized = (wp.showCmd == SW_SHOWMINIMIZED) &&
+                                  (wp.flags & WPF_RESTORETOMAXIMIZED);
+      taiga::settings.SetAppPositionMaximized(maximized || restore_to_maximized);
+      win::Rect rcWindow(wp.rcNormalPosition);
+      taiga::settings.SetAppPositionX(rcWindow.left);
+      taiga::settings.SetAppPositionY(rcWindow.top);
+      taiga::settings.SetAppPositionW(rcWindow.Width());
+      taiga::settings.SetAppPositionH(rcWindow.Height());
     }
   }
 
-  ui::DestroyDialog(ui::kDialogAbout);
-  ui::DestroyDialog(ui::kDialogAnimeInformation);
-  ui::DestroyDialog(ui::kDialogTestRecognition);
-  ui::DestroyDialog(ui::kDialogSettings);
-  ui::DestroyDialog(ui::kDialogUpdate);
+  ui::EndDialog(ui::Dialog::About);
+  ui::EndDialog(ui::Dialog::AnimeInformation);
+  ui::EndDialog(ui::Dialog::Settings);
+  ui::EndDialog(ui::Dialog::Update);
 
-  Taiga.Uninitialize();
+  taiga::app.Uninitialize();
 
   return TRUE;
 }
@@ -490,8 +631,9 @@ void MainDialog::OnDropFiles(HDROP hDropInfo) {
   WCHAR buffer[MAX_PATH];
   if (DragQueryFile(hDropInfo, 0, buffer, MAX_PATH) > 0) {
     anime::Episode episode;
-    Meow.ExamineTitle(buffer, episode);
-    MessageBox(ReplaceVariables(Settings[taiga::kSync_Notify_Format], episode).c_str(), TAIGA_APP_TITLE, MB_OK);
+    track::recognition::ParseOptions parse_options;
+    Meow.Parse(buffer, parse_options, episode);
+    MessageBox(ReplaceVariables(taiga::settings.GetSyncNotifyFormat(), episode).c_str(), TAIGA_APP_NAME, MB_OK);
   }
 #endif
 }
@@ -538,8 +680,8 @@ void MainDialog::OnPaint(HDC hdc, LPPAINTSTRUCT lpps) {
 void MainDialog::OnSize(UINT uMsg, UINT nType, SIZE size) {
   switch (uMsg) {
     case WM_SIZE: {
-      if (IsIconic()) {
-        if (Settings.GetBool(taiga::kApp_Behavior_MinimizeToTray))
+      if (nType == SIZE_MINIMIZED) {
+        if (taiga::settings.GetAppBehaviorMinimizeToTray())
           Hide();
         return;
       }
@@ -556,11 +698,11 @@ void MainDialog::OnSize(UINT uMsg, UINT nType, SIZE size) {
 void MainDialog::OnTaskbarCallback(UINT uMsg, LPARAM lParam) {
   // Taskbar creation notification
   if (uMsg == WM_TASKBARCREATED) {
-    Taskbar.Create(GetWindowHandle(), nullptr, TAIGA_APP_TITLE);
+    taskbar.Create(GetWindowHandle(), kAppSysTrayId, nullptr, TAIGA_APP_NAME);
 
   // Windows 7 taskbar interface
   } else if (uMsg == WM_TASKBARBUTTONCREATED) {
-    TaskbarList.Initialize(GetWindowHandle());
+    taskbar_list.Initialize(GetWindowHandle());
 
   // Taskbar callback
   } else if (uMsg == WM_TASKBARCALLBACK) {
@@ -569,26 +711,29 @@ void MainDialog::OnTaskbarCallback(UINT uMsg, LPARAM lParam) {
         break;
       }
       case NIN_BALLOONTIMEOUT: {
-        Taiga.current_tip_type = taiga::kTipTypeDefault;
+        taskbar.tip_type = TipType::Default;
         break;
       }
       case NIN_BALLOONUSERCLICK: {
-        switch (Taiga.current_tip_type) {
-          case taiga::kTipTypeNowPlaying:
+        switch (taskbar.tip_type) {
+          case TipType::NowPlaying:
             navigation.SetCurrentPage(kSidebarItemNowPlaying);
             break;
-          case taiga::kTipTypeSearch:
-            ExecuteAction(L"SearchAnime(" + CurrentEpisode.title + L")");
+          case TipType::Search:
+            ExecuteCommand(L"SearchAnime(" + CurrentEpisode.anime_title() + L")");
             break;
-          case taiga::kTipTypeTorrent:
+          case TipType::Torrent:
             navigation.SetCurrentPage(kSidebarItemFeeds);
             break;
-          case taiga::kTipTypeUpdateFailed:
-            History.queue.Check(false);
+          case TipType::UpdateFailed:
+            library::queue.Check(false);
+            break;
+          case TipType::NotApproved:
+            navigation.SetCurrentPage(kSidebarItemHistory);
             break;
         }
         ActivateWindow(GetWindowHandle());
-        Taiga.current_tip_type = taiga::kTipTypeDefault;
+        taskbar.tip_type = TipType::Default;
         break;
       }
       case WM_LBUTTONUP:
@@ -597,10 +742,9 @@ void MainDialog::OnTaskbarCallback(UINT uMsg, LPARAM lParam) {
         break;
       }
       case WM_RBUTTONUP: {
-        ui::Menus.UpdateAll(DlgAnimeList.GetCurrentItem());
         SetForegroundWindow();
-        ExecuteAction(ui::Menus.Show(GetWindowHandle(), 0, 0, L"Tray"));
-        ui::Menus.UpdateAll(DlgAnimeList.GetCurrentItem());
+        ui::Menus.UpdateAll();
+        ExecuteCommand(ui::Menus.Show(GetWindowHandle(), 0, 0, L"Tray"));
         break;
       }
     }
@@ -610,13 +754,17 @@ void MainDialog::OnTaskbarCallback(UINT uMsg, LPARAM lParam) {
 ////////////////////////////////////////////////////////////////////////////////
 
 void MainDialog::ChangeStatus(std::wstring str) {
-  if (!str.empty()) str = L"  " + str;
+  if (!str.empty())
+    str = L" " + str;  // padding
   statusbar.SetText(str.c_str());
 }
 
 void MainDialog::EnableInput(bool enable) {
-  // Toolbar buttons
+  // Menus
+  Menus.UpdateServices(enable);
+  // Toolbars
   toolbar_main.EnableButton(kToolbarButtonSync, enable);
+  toolbar_search.Enable(enable);
   // Content
   DlgAnimeList.Enable(enable);
   DlgHistory.Enable(enable);
@@ -643,11 +791,11 @@ void MainDialog::UpdateControlPositions(const SIZE* size) {
   rect_client.bottom -= rcStatus.Height();
 
   // Set sidebar
-  rect_sidebar_.Set(0, rect_client.top, 140, rect_client.bottom);
+  rect_sidebar_.Set(0, rect_client.top, ScaleX(140), rect_client.bottom);
   // Resize treeview
   if (treeview.IsVisible()) {
     win::Rect rect_tree(rect_sidebar_);
-    rect_tree.Inflate(-ScaleX(win::kControlMargin), -ScaleY(win::kControlMargin));
+    rect_tree.Inflate(-ScaleX(kControlMargin), -ScaleY(kControlMargin));
     treeview.SetPosition(nullptr, rect_tree);
   }
 
@@ -672,13 +820,13 @@ void MainDialog::UpdateStatusTimer() {
   win::Rect rect;
   GetClientRect(&rect);
 
-  if (CurrentEpisode.anime_id > anime::ID_UNKNOWN &&
-      IsUpdateAllowed(*AnimeDatabase.FindItem(CurrentEpisode.anime_id),
-                      CurrentEpisode, true)) {
+  auto anime_item = anime::db.Find(CurrentEpisode.anime_id);
+
+  if (anime_item && IsUpdateAllowed(*anime_item, CurrentEpisode, true)) {
     auto timer = taiga::timers.timer(taiga::kTimerMedia);
     int seconds = timer ? timer->ticks() : 0;
     bool waiting_for_media_player = seconds == 0 &&
-        Settings.GetBool(taiga::kSync_Update_WaitPlayer);
+        taiga::settings.GetSyncUpdateWaitPlayer();
 
     std::wstring str = L"List update in " + ToTimeString(seconds);
     if (waiting_for_media_player)
@@ -688,15 +836,16 @@ void MainDialog::UpdateStatusTimer() {
     statusbar.SetPartTipText(1, str.c_str());
     statusbar.SetPartTipText(2, L"Cancel update");
 
-    const int icon_width = 32;
+    const int icon_width = ScaleX(16);
     win::Dc hdc = statusbar.GetDC();
     hdc.AttachFont(statusbar.GetFont());
-    int timer_width = icon_width + GetTextWidth(hdc.Get(), str);
+    const int timer_width = ScaleX(5) + icon_width + ScaleX(5) + GetTextWidth(hdc.Get(), str) + ScaleX(4);
     hdc.DetachFont();
+    const int cancel_width = ScaleX(5) + icon_width + ScaleX(16);
 
-    statusbar.SetPartWidth(0, rect.Width() - timer_width - (icon_width + 4));
+    statusbar.SetPartWidth(0, rect.Width() - timer_width - cancel_width);
     statusbar.SetPartWidth(1, timer_width);
-    statusbar.SetPartWidth(2, icon_width + 4);
+    statusbar.SetPartWidth(2, cancel_width);
 
   } else {
     statusbar.SetPartWidth(0, rect.Width());
@@ -706,39 +855,49 @@ void MainDialog::UpdateStatusTimer() {
 }
 
 void MainDialog::UpdateTip() {
-  std::wstring tip = TAIGA_APP_TITLE;
-  if (Taiga.debug_mode)
+  std::wstring tip = TAIGA_APP_NAME;
+
+  if (taiga::app.options.debug_mode)
     tip += L" [debug]";
 
-  if (CurrentEpisode.anime_id > anime::ID_UNKNOWN) {
-    auto anime_item = AnimeDatabase.FindItem(CurrentEpisode.anime_id);
-    tip += L"\nWatching: " + anime_item->GetTitle() +
-      (!CurrentEpisode.number.empty() ? L" #" + CurrentEpisode.number : L"");
+  if (taiga::app.options.allow_multiple_instances)
+    tip += L" @ " + sync::GetCurrentServiceName();
+  
+  if (const auto anime_item = anime::db.Find(CurrentEpisode.anime_id)) {
+    tip += L"\nWatching: " + anime::GetPreferredTitle(*anime_item);
+
+    if (anime_item->GetEpisodeCount() != 1) {
+      tip += PushString(L" #", anime::GetEpisodeRange(CurrentEpisode));
+    }
   }
 
-  Taskbar.Modify(tip.c_str());
+  taskbar.Modify(tip.c_str());
 }
 
 void MainDialog::UpdateTitle() {
-  std::wstring title = TAIGA_APP_TITLE;
-  if (Taiga.debug_mode)
+  std::wstring title = TAIGA_APP_NAME;
+
+  if (taiga::app.options.debug_mode)
     title += L" [debug]";
 
-  const std::wstring username = taiga::GetCurrentUsername();
-  if (!username.empty())
-    title += L" \u2013 " + username;
-  if (Taiga.debug_mode) {
-    auto service = taiga::GetCurrentService();
-    if (service)
-      title += L" @ " + service->name();
-  }
+  const auto display_name = taiga::GetCurrentUserDisplayName();
+  if (!display_name.empty())
+    title += L" \u2013 " + display_name;
+  if (taiga::app.options.debug_mode || taiga::app.options.allow_multiple_instances)
+    title += L" @ " + sync::GetCurrentServiceName();
 
-  if (CurrentEpisode.anime_id > anime::ID_UNKNOWN) {
-    auto anime_item = AnimeDatabase.FindItem(CurrentEpisode.anime_id);
-    title += L" \u2013 " + anime_item->GetTitle() + PushString(L" #", CurrentEpisode.number);
-    if (Settings.GetBool(taiga::kSync_Update_OutOfRange) &&
-        anime::GetEpisodeLow(CurrentEpisode.number) > anime_item->GetMyLastWatchedEpisode() + 1) {
-      title += L" (out of range)";
+  if (const auto anime_item = anime::db.Find(CurrentEpisode.anime_id)) {
+    title += L" \u2013 " + anime::GetPreferredTitle(*anime_item);
+
+    if (anime_item->GetEpisodeCount() != 1) {
+      title += PushString(L" #", anime::GetEpisodeRange(CurrentEpisode));
+    }
+
+    if (taiga::settings.GetSyncUpdateOutOfRange()) {
+      if (anime::GetEpisodeLow(CurrentEpisode) >
+          anime_item->GetMyLastWatchedEpisode() + 1) {
+        title += L" (out of range)";
+      }
     }
   }
 
@@ -818,44 +977,39 @@ void MainDialog::Navigation::Refresh(bool add_to_history) {
 
 void MainDialog::Navigation::RefreshSearchText(int previous_page) {
   std::wstring cue_text;
-  std::wstring search_text;
-
   switch (current_page_) {
     case kSidebarItemAnimeList:
     case kSidebarItemSeasons:
-      parent->search_bar.mode = kSearchModeService;
-      cue_text = L"Filter list or search " + taiga::GetCurrentService()->name();
+      parent->search_bar.mode = SearchMode::Service;
+      cue_text = L"Filter list or search " + sync::GetCurrentServiceName();
       break;
     case kSidebarItemNowPlaying:
     case kSidebarItemHistory:
     case kSidebarItemStats:
     case kSidebarItemSearch:
-      parent->search_bar.mode = kSearchModeService;
-      cue_text = L"Search " + taiga::GetCurrentService()->name() + L" for anime";
-      if (current_page_ == kSidebarItemSearch)
-        search_text = DlgSearch.search_text;
+      parent->search_bar.mode = SearchMode::Service;
+      cue_text = L"Search " + sync::GetCurrentServiceName() + L" for anime";
       break;
     case kSidebarItemFeeds:
-      parent->search_bar.mode = kSearchModeFeed;
+      parent->search_bar.mode = SearchMode::Feed;
       cue_text = L"Search for torrents";
       break;
   }
-
-  if (!parent->search_bar.filters.text.empty()) {
-    parent->search_bar.filters.text.clear();
-    switch (previous_page) {
-      case kSidebarItemAnimeList:
-        DlgAnimeList.RefreshList();
-        DlgAnimeList.RefreshTabs();
-        break;
-      case kSidebarItemSeasons:
-        DlgSeason.RefreshList();
-        break;
-    }
-  }
-
   parent->edit.SetCueBannerText(cue_text.c_str());
-  parent->edit.SetText(search_text);
+
+  switch (current_page_) {
+    case kSidebarItemAnimeList:
+    case kSidebarItemSeasons:
+    case kSidebarItemSearch:
+    case kSidebarItemFeeds:
+      parent->search_bar.filters.text[current_page_] = parent->search_bar.text[current_page_];
+      break;
+    default:
+      parent->search_bar.filters.text[current_page_].clear();
+      parent->search_bar.text[current_page_].clear();
+      break;
+  }
+  parent->edit.SetText(parent->search_bar.text[current_page_]);
 }
 
 }  // namespace ui
